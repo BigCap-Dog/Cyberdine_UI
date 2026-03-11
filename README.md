@@ -17,17 +17,12 @@ Node.js and pnpm will be installed automatically if not present.
 ---
 
 ## Fresh Install (new rig)
+
 ```bash
 cd ~
 git clone https://github.com/BigCap-Dog/Cyberdine_UI.git
 cd Cyberdine_UI
-
-# Copy logo assets into patches directory
-cp assets/favicon.ico patches/
-cp assets/favicon.png patches/
-
-# Run the installer
-chmod +x setup.sh
+chmod +x setup.sh update.sh
 ./setup.sh
 ```
 
@@ -36,42 +31,39 @@ When prompted, enter the full path to your FreqTrade `user_data` directory, e.g.
 /home/freq/freqtrade/user_data
 ```
 
-The script will:
+The script will automatically:
 1. Install Node.js + pnpm (if needed)
 2. Clone FreqUI into `user_data/cs_ui/`
-3. Build the UI
-4. Symlink it into FreqTrade
-5. Apply all backend + frontend patches
+3. Copy all patches and assets (logos, favicons)
+4. Build the UI
+5. Symlink it into FreqTrade
+6. Apply all backend + frontend patches
+7. Rebuild with patches applied
 
-**After setup, restart FreqTrade** for backend patches to take effect.
+**Restart FreqTrade** after setup for backend patches to take effect.
 
 ---
 
 ## Update (existing rig)
 
-When patches are updated in this repo:
 ```bash
 cd ~/Cyberdine_UI
-git pull
-
-cp patches/*.sh ~/freqtrade/user_data/cs_ui/patches/
-cp assets/* ~/freqtrade/user_data/cs_ui/patches/
-
-cd ~/freqtrade/user_data/cs_ui
-./apply_patches.sh
-./rebuild.sh
+./update.sh
 ```
+
+That's it. The script pulls latest changes, copies patches + assets, applies them, and rebuilds.
 
 Then restart FreqTrade.
 
 ---
 
 ## After a FreqTrade Update
+
+FreqTrade updates may overwrite the UI symlink and backend patches. To restore:
+
 ```bash
 cd ~/freqtrade/user_data/cs_ui
-./relink.sh
-./apply_patches.sh
-./rebuild.sh
+./relink.sh && ./apply_patches.sh && ./rebuild.sh
 ```
 
 Then restart FreqTrade.
@@ -84,9 +76,9 @@ Then restart FreqTrade.
 
 | Patch | Type | Description |
 |-------|------|-------------|
-| `00_cyberdine_skin.sh` | Frontend | Dark console theme, branding, colors, fonts, logos |
-| `01_live_candle.sh` | Both | Live candle on chart via `/pair_candles/live` endpoint |
-| `02_performance_dashboard.sh` | Both | Model performance page with charts + paginated trade table |
+| `00_cyberdine_skin.sh` | Frontend | Dark console theme, Cyberdine branding, custom colors, fonts, logos |
+| `01_live_candle.sh` | Both | Live candle on chart — adds `/pair_candles/live` backend endpoint + frontend polling |
+| `02_performance_dashboard.sh` | Both | Model performance page — confidence vs profit charts, paginated trade table |
 
 ---
 
@@ -105,20 +97,23 @@ Then restart FreqTrade.
 1. Create `patches/03_my_feature.sh`
 2. Use `$FT_PACKAGE_DIR` and `$CS_UI_DIR` env vars
 3. Make it idempotent (check before patching with `grep -q`)
-4. Test: `./apply_patches.sh && ./rebuild.sh`
-5. Commit and push:
+4. Test locally:
+```bash
+cd ~/freqtrade/user_data/cs_ui
+./apply_patches.sh && ./rebuild.sh
+```
+5. Add to repo:
 ```bash
 cd ~/Cyberdine_UI
-git add -A
-git commit -m "Add patch: my feature"
-git push
+cp ~/freqtrade/user_data/cs_ui/patches/03_my_feature.sh patches/
+git add -A && git commit -m "Add patch: my feature" && git push
 ```
 
 ---
 
 ## Troubleshooting
 
-**UI not loading:** Check symlink — `ls -la ~/freqtrade/freqtrade/rpc/api_server/ui/installed` should point to `cs_ui/dist`. Run `./relink.sh` if broken.
+**UI not loading:** Check symlink: `ls -la ~/freqtrade/freqtrade/rpc/api_server/ui/installed` — should point to `cs_ui/dist`. Run `./relink.sh` if broken.
 
 **Backend patches not working:** Restart FreqTrade after applying patches.
 
