@@ -6,6 +6,8 @@
 # FRONTEND: Updates SingleCandleChartContainer to poll every 5s
 #           and replace last candle OHLCV with fresh data.
 # STORE:    Exposes api from ftbot store for component access.
+#
+# All backend insertions use Python to avoid sed escaping issues.
 # ============================================================
 set -euo pipefail
 
@@ -19,72 +21,98 @@ echo "  [01] Patching rpc.py..."
 if grep -q "_rpc_live_candle" "$RPC_FILE"; then
     echo "    Already patched, skipping."
 else
-    sed -i '/def _ws_all_analysed_dataframes/i\
-    def _rpc_live_candle(self, pair: str, timeframe: str) -> dict[str, Any]:\
-        """Return the current incomplete candle from the exchange cache.\
-        Zero exchange API calls - reads from in-memory klines cache only.\
-        """\
-        from freqtrade.exchange import timeframe_to_msecs\
-\
-        df = self._freqtrade.dataprovider.ohlcv(pair, timeframe)\
-        if df.empty:\
-            return {"pair": pair, "timeframe": timeframe, "candle": None}\
-\
-        last_row = df.iloc[-1]\
-        return {\
-            "pair": pair,\
-            "timeframe": timeframe,\
-            "timeframe_ms": timeframe_to_msecs(timeframe),\
-            "candle": {\
-                "date": int(last_row["date"].timestamp() * 1000),\
-                "open": float(last_row["open"]),\
-                "high": float(last_row["high"]),\
-                "low": float(last_row["low"]),\
-                "close": float(last_row["close"]),\
-                "volume": float(last_row["volume"]),\
-            },\
-        }\
-' "$RPC_FILE"
-    echo "    Done."
+    python3 - "$RPC_FILE" << 'PYEOF'
+import sys
+
+filepath = sys.argv[1]
+with open(filepath, "r") as f:
+    content = f.read()
+
+method = '''
+    def _rpc_live_candle(self, pair: str, timeframe: str) -> dict[str, Any]:
+        """Return the current incomplete candle from the exchange cache.
+        Zero exchange API calls - reads from in-memory klines cache only.
+        """
+        from freqtrade.exchange import timeframe_to_msecs
+
+        df = self._freqtrade.dataprovider.ohlcv(pair, timeframe)
+        if df.empty:
+            return {"pair": pair, "timeframe": timeframe, "candle": None}
+
+        last_row = df.iloc[-1]
+        return {
+            "pair": pair,
+            "timeframe": timeframe,
+            "timeframe_ms": timeframe_to_msecs(timeframe),
+            "candle": {
+                "date": int(last_row["date"].timestamp() * 1000),
+                "open": float(last_row["open"]),
+                "high": float(last_row["high"]),
+                "low": float(last_row["low"]),
+                "close": float(last_row["close"]),
+                "volume": float(last_row["volume"]),
+            },
+        }
+'''
+
+anchor = "    def _ws_all_analysed_dataframes"
+if anchor in content:
+    content = content.replace(anchor, method + "\n" + anchor)
+    with open(filepath, "w") as f:
+        f.write(content)
+    print("    Done.")
+else:
+    print("    ERROR: anchor not found in rpc.py")
+PYEOF
 fi
 
 # ── BACKEND: Add /pair_candles/live route ──
 echo "  [01] Patching api_trading.py..."
-if grep -q "pair_candles_live" "$API_FILE"; then
-    echo "    Already patched, skipping."
-else
-    sed -i '/@router.get("\/pair_candles", response_model=PairHistory/i\
-@router.get("/pair_candles/live", tags=["Candle data"])\
-def pair_candles_live(pair: str, timeframe: str, rpc: RPC = Depends(get_rpc)):\
-    return rpc._rpc_live_candle(pair, timeframe)\
-\
-' "$API_FILE"
-    echo "    Done."
-fi
+python3 - "$API_FILE" << 'PYEOF'
+import sys
+
+filepath = sys.argv[1]
+with open(filepath, "r") as f:
+    content = f.read()
+
+if "def pair_candles_live" in content:
+    print("    Already patched, skipping.")
+else:
+    route = '''@router.get("/pair_candles/live", tags=["Candle data"])
+def pair_candles_live(pair: str, timeframe: str, rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_live_candle(pair, timeframe)
+
+
+'''
+    anchor = '@router.get("/pair_candles", response_model=PairHistory'
+    if anchor in content:
+        content = content.replace(anchor, route + anchor, 1)
+        with open(filepath, "w") as f:
+            f.write(content)
+        print("    Done.")
+    else:
+        print("    ERROR: anchor not found in api_trading.py")
+PYEOF
 
 # ── STORE: Expose api from ftbot store ──
 echo "  [01] Exposing api in ftbot store..."
-if grep -q "api,$" "$STORE_FILE" || grep -q "api," "$STORE_FILE" | head -1 | grep -q "return"; then
-    # Check more carefully
-    if python3 -c "
-content = open('$STORE_FILE').read()
-# Check if api is in the return block
-import re
-m = re.search(r'return \{([^}]{0,200})', content)
+python3 - "$STORE_FILE" << 'PYEOF'
+import sys, re
+
+filepath = sys.argv[1]
+with open(filepath, "r") as f:
+    content = f.read()
+
+# Check if api is already in the return block
+m = re.search(r'return \{([^}]{0,300})', content)
 if m and 'api,' in m.group(1):
-    exit(0)
+    print("    Already exposed, skipping.")
 else:
-    exit(1)
-" 2>/dev/null; then
-        echo "    Already exposed, skipping."
-    else
-        sed -i 's/return {/return {\n        api,/' "$STORE_FILE"
-        echo "    Done."
-    fi
-else
-    sed -i 's/return {/return {\n        api,/' "$STORE_FILE"
-    echo "    Done."
-fi
+    content = content.replace("return {", "return {\n        api,", 1)
+    with open(filepath, "w") as f:
+        f.write(content)
+    print("    Done.")
+PYEOF
 
 # ── FRONTEND: Replace SingleCandleChartContainer.vue ──
 echo "  [01] Updating SingleCandleChartContainer.vue..."
@@ -187,7 +215,6 @@ const datasetWithLiveCandle = computed((): PairHistory | undefined => {
   const lastClosedTs = lastRow[colDate];
   const liveCandleTs = lc.date;
 
-  // Build the live candle row matching the column layout
   const newRow = new Array(ds.columns.length).fill(null);
   newRow[colDate] = liveCandleTs;
   newRow[colOpen] = lc.open;
@@ -199,21 +226,14 @@ const datasetWithLiveCandle = computed((): PairHistory | undefined => {
   const updatedData = [...ds.data];
 
   if (liveCandleTs === lastClosedTs) {
-    // Same timestamp — replace the last candle with fresh OHLCV
     updatedData[updatedData.length - 1] = newRow;
   } else if (liveCandleTs > lastClosedTs) {
-    // Newer timestamp — append as new candle
     updatedData.push(newRow);
   } else {
-    // Older — no update needed
     return ds;
   }
 
-  return {
-    ...ds,
-    data: updatedData,
-    length: updatedData.length,
-  };
+  return { ...ds, data: updatedData, length: updatedData.length };
 });
 
 const datasetColumns = computed(() =>
@@ -272,7 +292,6 @@ watch(() => plotStore.plotConfig, () => {
 
 watch(() => props.timeframe, () => refreshIfNecessary());
 
-// Start/stop live candle polling
 watch(
   [() => props.pair, () => props.timeframe, () => props.historicView],
   () => {

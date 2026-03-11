@@ -4,8 +4,9 @@
 #
 # BACKEND:  Adds /performance/model endpoint (bulk DB query, no N+1)
 # FRONTEND: PerformanceView.vue + router + navbar entry
-#           - Paginated table (50 trades per page)
-#           - 30% larger table font
+#           - Paginated table (20 trades per page)
+#           - Bold uppercase centered headers, larger font
+#           - Stake amount column
 #
 # Uses Python for JS file insertions to avoid sed { brace issues.
 # ============================================================
@@ -175,17 +176,32 @@ fi
 
 # ── BACKEND: api_trading.py ──
 echo "  [02] Patching api_trading.py (performance endpoint)..."
-if grep -q "performance_model" "$API_FILE"; then
-    echo "    Already patched, skipping."
-else
-    sed -i '/@router.get("\/pair_candles", response_model=PairHistory/i\
-@router.get("/performance/model", tags=["Performance"])\
-def performance_model(rpc: RPC = Depends(get_rpc)):\
-    return rpc._rpc_model_performance()\
-\
-' "$API_FILE"
-    echo "    Done."
-fi
+python3 - "$API_FILE" << 'PYEOF'
+import sys
+
+filepath = sys.argv[1]
+with open(filepath, "r") as f:
+    content = f.read()
+
+if "def performance_model" in content:
+    print("    Already patched, skipping.")
+else:
+    route = '''@router.get("/performance/model", tags=["Performance"])
+def performance_model(rpc: RPC = Depends(get_rpc)):
+    return rpc._rpc_model_performance()
+
+
+'''
+    # Insert before the /pair_candles GET route (the original FreqTrade one)
+    anchor = '@router.get("/pair_candles", response_model=PairHistory'
+    if anchor in content:
+        content = content.replace(anchor, route + anchor, 1)
+        with open(filepath, "w") as f:
+            f.write(content)
+        print("    Done.")
+    else:
+        print("    ERROR: anchor not found in api_trading.py")
+PYEOF
 
 # ── FRONTEND: PerformanceView.vue (always overwrite to get latest) ──
 echo "  [02] Writing PerformanceView.vue..."
@@ -233,10 +249,11 @@ interface PerfResponse {
 const perfData = ref<PerfResponse | null>(null);
 const loading = ref(false);
 const error = ref('');
+const selectedPair = ref<string | null>(null); // null = ALL PAIRS
 
 // Pagination state
 const currentPage = ref(1);
-const pageSize = 50;
+const pageSize = 20;
 
 async function fetchPerformance() {
   loading.value = true; error.value = '';
@@ -244,7 +261,8 @@ async function fetchPerformance() {
     const { api } = botStore.activeBot;
     const { data } = await api.get<PerfResponse>('/performance/model');
     perfData.value = data;
-    currentPage.value = 1; // Reset to first page on refresh
+    currentPage.value = 1;
+    selectedPair.value = null;
   } catch (e: any) {
     error.value = e?.message || 'Failed to load';
   } finally { loading.value = false; }
@@ -253,14 +271,88 @@ async function fetchPerformance() {
 onMounted(() => fetchPerformance());
 
 const theme = computed(() => settingsStore.chartTheme);
-const closedTrades = computed(() => perfData.value?.trades.filter((t) => !t.is_open) ?? []);
-const allTrades = computed(() => perfData.value?.trades ?? []);
+
+// Filtered trades based on selected pair
+const filteredTrades = computed(() => {
+  const all = perfData.value?.trades ?? [];
+  if (!selectedPair.value) return all;
+  return all.filter((t) => t.pair === selectedPair.value);
+});
+
+const closedTrades = computed(() => filteredTrades.value.filter((t) => !t.is_open));
+const allTrades = computed(() => filteredTrades.value);
+
+// Per-pair stats aggregation
+interface PairStat {
+  pair: string;
+  trades: number;
+  open: number;
+  winRate: number;
+  avgProfit: number;
+  avgConfidence: number;
+  avgPeak: number;
+  avgLeft: number;
+  avgDrawdown: number;
+}
+
+const pairStats = computed((): PairStat[] => {
+  const all = perfData.value?.trades ?? [];
+  const pairMap: Record<string, TradePerf[]> = {};
+  for (const t of all) {
+    if (!pairMap[t.pair]) pairMap[t.pair] = [];
+    pairMap[t.pair].push(t);
+  }
+
+  const stats: PairStat[] = Object.keys(pairMap).sort().map((pair) => {
+    const trades = pairMap[pair];
+    const closed = trades.filter((t) => !t.is_open);
+    const openCount = trades.filter((t) => t.is_open).length;
+    const wins = closed.filter((t) => t.close_profit && t.close_profit > 0).length;
+    const winRate = closed.length > 0 ? wins / closed.length : 0;
+    const avgProfit = closed.length > 0
+      ? closed.reduce((s, t) => s + (t.close_profit ?? 0), 0) / closed.length : 0;
+    const avgConf = trades.length > 0
+      ? trades.reduce((s, t) => s + t.model_confidence, 0) / trades.length : 0;
+    const peakTrades = closed.filter((t) => t.peak_profit !== null);
+    const avgPeak = peakTrades.length > 0
+      ? peakTrades.reduce((s, t) => s + (t.peak_profit ?? 0), 0) / peakTrades.length : 0;
+    const leftTrades = closed.filter((t) => t.left_on_table !== null);
+    const avgLeft = leftTrades.length > 0
+      ? leftTrades.reduce((s, t) => s + (t.left_on_table ?? 0), 0) / leftTrades.length : 0;
+    const ddTrades = closed.filter((t) => t.drawdown_from_peak !== null);
+    const avgDD = ddTrades.length > 0
+      ? ddTrades.reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / ddTrades.length : 0;
+
+    return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgConfidence: avgConf, avgPeak, avgLeft, avgDrawdown: avgDD };
+  });
+
+  return stats;
+});
+
+const allPairsSummary = computed((): PairStat => {
+  const s = perfData.value?.summary;
+  return {
+    pair: 'ALL PAIRS',
+    trades: s?.total_trades ?? 0,
+    open: s?.open_trades ?? 0,
+    winRate: s?.win_rate ?? 0,
+    avgProfit: s?.avg_profit ?? 0,
+    avgConfidence: s?.avg_model_confidence ?? 0,
+    avgPeak: 0,
+    avgLeft: s?.avg_left_on_table ?? 0,
+    avgDrawdown: s?.avg_drawdown_from_peak ?? 0,
+  };
+});
+
+function selectPair(pair: string | null) {
+  selectedPair.value = pair;
+  currentPage.value = 1;
+}
 
 // Pagination computed
 const totalPages = computed(() => Math.ceil(allTrades.value.length / pageSize));
 const paginatedTrades = computed(() => {
   const start = (currentPage.value - 1) * pageSize;
-  // Show most recent trades first (reverse order)
   const sorted = [...allTrades.value].reverse();
   return sorted.slice(start, start + pageSize);
 });
@@ -346,14 +438,64 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
     <div v-if="error" class="bg-red-500/20 text-red-400 p-3 rounded mb-4">{{ error }}</div>
     <div v-if="loading && !perfData" class="flex justify-center py-20"><ProgressSpinner class="w-8 h-8" /></div>
     <template v-if="perfData">
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Total Trades</div><div class="text-2xl font-bold">{{ perfData.summary.total_trades }}</div><div class="text-xs text-surface-500">{{ perfData.summary.open_trades }} open</div></div>
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Win Rate</div><div class="text-2xl font-bold" :class="perfData.summary.win_rate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(perfData.summary.win_rate, 1) }}</div></div>
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Avg Confidence</div><div class="text-2xl font-bold text-blue-400">{{ pct(perfData.summary.avg_model_confidence, 0) }}</div></div>
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Avg Profit</div><div class="text-2xl font-bold" :class="perfData.summary.avg_profit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(perfData.summary.avg_profit) }}</div></div>
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Avg Left on Table</div><div class="text-2xl font-bold text-yellow-400">{{ pct(perfData.summary.avg_left_on_table) }}</div><div class="text-xs text-surface-500">peak - close</div></div>
-        <div class="bg-surface-800 rounded-lg p-3 text-center"><div class="text-sm text-surface-400">Avg Peak→Trough</div><div class="text-2xl font-bold text-red-400">{{ pct(perfData.summary.avg_drawdown_from_peak) }}</div><div class="text-xs text-surface-500">max drawdown from peak</div></div>
+      <!-- ═══ TOP: Pair Stats Breakdown Table ═══ -->
+      <div class="bg-surface-800 rounded-lg p-4 mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Pair Breakdown</h2>
+          <span v-if="selectedPair" class="text-sm text-primary-400 cursor-pointer" @click="selectPair(null)">← Show All Pairs</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full" style="font-size: 0.9rem;">
+            <thead><tr class="border-b-2 border-surface-500" style="font-size: 0.85rem;">
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Pair</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Trades</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Open</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Win Rate</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Profit</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Conf</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Peak</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Left</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Drawdown</th>
+            </tr></thead>
+            <tbody>
+              <tr
+                v-for="ps in pairStats" :key="ps.pair"
+                class="border-b border-surface-700 cursor-pointer transition-colors"
+                :class="selectedPair === ps.pair ? 'bg-primary-500/15 border-primary-500/30' : 'hover:bg-surface-700/50'"
+                @click="selectPair(ps.pair)"
+              >
+                <td class="p-2.5 text-center font-semibold">{{ ps.pair }}</td>
+                <td class="p-2.5 text-center font-mono">{{ ps.trades }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.open > 0 ? 'text-cyan-400' : ''">{{ ps.open }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.winRate, 1) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
+                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(ps.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono text-green-400">{{ pct(ps.avgPeak) }}</td>
+                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
+                <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
+              </tr>
+              <!-- ALL PAIRS summary row -->
+              <tr
+                class="border-t-2 border-surface-500 cursor-pointer font-bold transition-colors"
+                :class="selectedPair === null ? 'bg-primary-500/15 border-primary-500/30' : 'hover:bg-surface-700/50'"
+                @click="selectPair(null)"
+              >
+                <td class="p-2.5 text-center uppercase text-primary-400">All Pairs</td>
+                <td class="p-2.5 text-center font-mono">{{ allPairsSummary.trades }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.open > 0 ? 'text-cyan-400' : ''">{{ allPairsSummary.open }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.winRate, 1) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
+                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(allPairsSummary.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono text-green-400">—</td>
+                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(allPairsSummary.avgLeft) }}</td>
+                <td class="p-2.5 text-center font-mono text-red-400">{{ pct(allPairsSummary.avgDrawdown) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
+
+      <!-- ═══ MIDDLE: Charts ═══ -->
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="confidenceVsProfitChart" :theme="theme" autoresize class="w-full h-full" /></div>
         <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="peakVsCloseChart" :theme="theme" autoresize class="w-full h-full" /></div>
@@ -373,26 +515,36 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
         </div>
         <div class="overflow-x-auto">
           <table class="w-full" style="font-size: 0.93rem;">
-            <thead><tr class="text-surface-400 border-b border-surface-600" style="font-size: 0.82rem;">
-              <th class="text-left p-2.5">#</th><th class="text-left p-2.5">Pair</th><th class="text-left p-2.5">Dir</th>
-              <th class="text-right p-2.5">Conf</th><th class="text-right p-2.5">Lev</th><th class="text-right p-2.5">Profit</th>
-              <th class="text-right p-2.5">Peak</th><th class="text-right p-2.5">Trough</th><th class="text-right p-2.5">Left</th>
-              <th class="text-left p-2.5">Phase</th><th class="text-left p-2.5">Exit</th><th class="text-right p-2.5">Duration</th>
+            <thead><tr class="border-b-2 border-surface-500" style="font-size: 0.88rem;">
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">#</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Pair</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Dir</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Conf</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Lev</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Stake</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Profit</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Peak</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Trough</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Left</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Phase</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Exit</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Duration</th>
             </tr></thead>
             <tbody>
               <tr v-for="t in paginatedTrades" :key="t.id" class="border-b border-surface-700 hover:bg-surface-700/50" :class="{ 'opacity-70': t.is_open }">
-                <td class="p-2.5">{{ t.id }}</td>
-                <td class="p-2.5 font-mono">{{ t.pair }}</td>
-                <td class="p-2.5"><span :class="t.direction === 'long' ? 'text-green-400' : 'text-red-400'">{{ t.direction.toUpperCase() }}</span></td>
-                <td class="p-2.5 text-right font-mono">{{ (t.model_confidence*100).toFixed(0) }}%</td>
-                <td class="p-2.5 text-right">{{ t.leverage }}x</td>
-                <td class="p-2.5 text-right font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.is_open ? 'open' : pct(t.close_profit) }}</td>
-                <td class="p-2.5 text-right font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
-                <td class="p-2.5 text-right font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
-                <td class="p-2.5 text-right font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
-                <td class="p-2.5"><span class="text-sm px-1.5 py-0.5 rounded" :class="{ 'bg-green-500/20 text-green-400': t.sl_phase === 'Trailing', 'bg-yellow-500/20 text-yellow-400': t.sl_phase === 'Armed_SL', 'bg-red-500/20 text-red-400': t.sl_phase === 'Stoploss' }">{{ t.sl_phase || '—' }}</span></td>
-                <td class="p-2.5 max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
-                <td class="p-2.5 text-right">{{ t.duration_mins ? `${Math.floor(t.duration_mins/60)}h ${t.duration_mins%60}m` : '—' }}</td>
+                <td class="p-2.5 text-center">{{ t.id }}</td>
+                <td class="p-2.5 text-center font-mono">{{ t.pair }}</td>
+                <td class="p-2.5 text-center"><span :class="t.direction === 'long' ? 'text-green-400' : 'text-red-400'">{{ t.direction.toUpperCase() }}</span></td>
+                <td class="p-2.5 text-center font-mono">{{ (t.model_confidence*100).toFixed(0) }}%</td>
+                <td class="p-2.5 text-center">{{ t.leverage }}x</td>
+                <td class="p-2.5 text-center font-mono">${{ t.stake_amount.toFixed(1) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.is_open ? 'open' : pct(t.close_profit) }}</td>
+                <td class="p-2.5 text-center font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
+                <td class="p-2.5 text-center font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
+                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
+                <td class="p-2.5 text-center"><span class="text-sm px-1.5 py-0.5 rounded" :class="{ 'bg-green-500/20 text-green-400': t.sl_phase === 'Trailing', 'bg-yellow-500/20 text-yellow-400': t.sl_phase === 'Armed_SL', 'bg-red-500/20 text-red-400': t.sl_phase === 'Stoploss' }">{{ t.sl_phase || '—' }}</span></td>
+                <td class="p-2.5 text-center max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
+                <td class="p-2.5 text-center">{{ t.duration_mins ? `${Math.floor(t.duration_mins/60)}h ${t.duration_mins%60}m` : '—' }}</td>
               </tr>
             </tbody>
           </table>
@@ -489,9 +641,9 @@ insert = '''  {
 '''
 content = content.replace(
     \"\"\"  {
-    label: 'Logs',\"\"\",
+    label: 'Chart',\"\"\",
     insert + \"\"\"  {
-    label: 'Logs',\"\"\"
+    label: 'Chart',\"\"\"
 )
 with open('$NAVBAR_FILE', 'w') as f:
     f.write(content)

@@ -157,15 +157,67 @@ else
     echo "    Done."
 fi
 
-# ── NAVBAR: Dark background + branding ──
-echo "  [00] Patching NavBar.vue (branding)..."
+# ── NAVBAR: Dark background + branding + nav order + active tab style ──
+echo "  [00] Patching NavBar.vue (branding + styling)..."
 if grep -q "Cyberdine Strategies" "$NAVBAR_FILE"; then
     echo "    Already patched, skipping."
 else
     sed -i 's/bg-primary-500/bg-\[#070b10\] border-\[#1a2332\]/' "$NAVBAR_FILE"
     sed -i 's/Freqtrade UI/Cyberdine Strategies/' "$NAVBAR_FILE"
     sed -i "s/let title = 'freqUI'/let title = 'Cyberdine Strategies'/" "$NAVBAR_FILE"
-    echo "    Done."
+
+    # Reorder nav items: Dashboard first, then Trade, then rest
+    # And style active links with bright blue bg, dark bold text
+    python3 -c "
+with open('$NAVBAR_FILE', 'r') as f:
+    content = f.read()
+
+# Replace the active-class on nav links for bright blue highlight style
+content = content.replace(
+    'active-class=\"underline\"',
+    'active-class=\"bg-[#00d4ff] text-[#030508] font-bold rounded px-2 no-underline\"'
+)
+
+# Reorder: move Dashboard before Trade
+# Find the Trade nav item and Dashboard nav item, swap their order
+old_order = '''  {
+    label: 'Trade',
+    to: '/trade',
+    visible: computed(() => !botStore.canRunBacktest),
+    icon: 'i-mdi-currency-usd',
+  },
+  {
+    label: 'Dashboard',
+    to: '/dashboard',
+    visible: computed(() => !botStore.canRunBacktest),
+    icon: 'i-mdi-view-dashboard',
+  },'''
+
+new_order = '''  {
+    label: 'Dashboard',
+    to: '/dashboard',
+    visible: computed(() => !botStore.canRunBacktest),
+    icon: 'i-mdi-view-dashboard',
+  },
+  {
+    label: 'Trade',
+    to: '/trade',
+    visible: computed(() => !botStore.canRunBacktest),
+    icon: 'i-mdi-currency-usd',
+  },'''
+
+content = content.replace(old_order, new_order)
+
+# Make nav link text uppercase and slightly larger
+content = content.replace(
+    'class=\"text-surface-200 flex items-center gap-2\"',
+    'class=\"text-surface-200 flex items-center gap-2 uppercase text-sm font-semibold tracking-wide py-1 px-2 rounded transition-all\"'
+)
+
+with open('$NAVBAR_FILE', 'w') as f:
+    f.write(content)
+print('    Done.')
+"
 fi
 
 # ── BODY LAYOUT: Background ──

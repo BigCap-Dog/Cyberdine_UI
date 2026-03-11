@@ -392,6 +392,16 @@ APPLYPATCH_EOF
 chmod +x "$CS_UI_DIR/apply_patches.sh"
 
 # ============================================================
+# Save config for update.sh
+# ============================================================
+CONFIG_FILE="$REPO_DIR/.cyberdine_config"
+cat > "$CONFIG_FILE" << CONFIGEOF
+USER_DATA_DIR=$USER_DATA_DIR
+FT_PACKAGE_DIR=$FT_PACKAGE_DIR
+CONFIGEOF
+success "Config saved to $CONFIG_FILE"
+
+# ============================================================
 # Done
 # ============================================================
 echo ""
