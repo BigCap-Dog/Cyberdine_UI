@@ -120,3 +120,17 @@ git add -A && git commit -m "Add patch: my feature" && git push
 **Performance page timeout:** Ensure latest `02_performance_dashboard.sh` (bulk query version).
 
 **Favicon not showing:** Hard refresh `Ctrl+Shift+R` or try incognito window.
+
+---
+
+## First Time Updating (if installed before update.sh existed)
+
+If your rig was set up before `update.sh` was added to the repo:
+```bash
+cd ~/Cyberdine_UI
+git pull
+chmod +x update.sh
+./update.sh
+```
+
+After this, future updates are just `./update.sh`.
