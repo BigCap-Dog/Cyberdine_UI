@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.2.0 — 2026-03-13
+
+Performance Tab- added more stats, updated phase changes
+
+
 ## v1.0.1 — 2026-03-11
 
 ### Fixes

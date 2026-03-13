@@ -289,7 +289,11 @@ interface PairStat {
   open: number;
   winRate: number;
   avgProfit: number;
+  avgProfitDollar: number;
   avgConfidence: number;
+  confToWinRate: number;      // confidence / winRate — 1.0 = perfect calibration
+  confToProfitRatio: number;  // winRate / avgConfidence — does high conf = high profit rate?
+  exitEfficiency: number;     // close_profit / peak_profit — 1.0 = perfect exit at peak
   avgPeak: number;
   avgLeft: number;
   avgDrawdown: number;
@@ -311,8 +315,22 @@ const pairStats = computed((): PairStat[] => {
     const winRate = closed.length > 0 ? wins / closed.length : 0;
     const avgProfit = closed.length > 0
       ? closed.reduce((s, t) => s + (t.close_profit ?? 0), 0) / closed.length : 0;
+    const avgProfitDollar = closed.length > 0
+      ? closed.reduce((s, t) => s + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0) / closed.length : 0;
     const avgConf = trades.length > 0
       ? trades.reduce((s, t) => s + t.model_confidence, 0) / trades.length : 0;
+
+    // Confidence calibration: winRate / avgConfidence — 1.0 means perfect calibration
+    const confToWinRate = avgConf > 0 ? winRate / avgConf : 0;
+    // Confidence to profit: does high confidence translate to profit?
+    const confToProfitRatio = avgConf > 0 ? winRate / avgConf : 0;
+
+    // Exit efficiency: how close does the model exit to peak profit?
+    // efficiency = avg(close_profit / peak_profit) for winning trades with positive peak
+    const effTrades = closed.filter((t) => t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
+    const exitEfficiency = effTrades.length > 0
+      ? effTrades.reduce((s, t) => s + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
+
     const peakTrades = closed.filter((t) => t.peak_profit !== null);
     const avgPeak = peakTrades.length > 0
       ? peakTrades.reduce((s, t) => s + (t.peak_profit ?? 0), 0) / peakTrades.length : 0;
@@ -323,7 +341,7 @@ const pairStats = computed((): PairStat[] => {
     const avgDD = ddTrades.length > 0
       ? ddTrades.reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / ddTrades.length : 0;
 
-    return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgConfidence: avgConf, avgPeak, avgLeft, avgDrawdown: avgDD };
+    return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgProfitDollar, avgConfidence: avgConf, confToWinRate, confToProfitRatio, exitEfficiency, avgPeak, avgLeft, avgDrawdown: avgDD };
   });
 
   return stats;
@@ -331,13 +349,26 @@ const pairStats = computed((): PairStat[] => {
 
 const allPairsSummary = computed((): PairStat => {
   const s = perfData.value?.summary;
+  const allClosed = (perfData.value?.trades ?? []).filter((t) => !t.is_open);
+  const avgConf = s?.avg_model_confidence ?? 0;
+  const winRate = s?.win_rate ?? 0;
+  const confToWinRate = avgConf > 0 ? winRate / avgConf : 0;
+  const avgProfitDollar = allClosed.length > 0
+    ? allClosed.reduce((sum, t) => sum + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0) / allClosed.length : 0;
+  const effTrades = allClosed.filter((t) => t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
+  const exitEfficiency = effTrades.length > 0
+    ? effTrades.reduce((sum, t) => sum + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
   return {
     pair: 'ALL PAIRS',
     trades: s?.total_trades ?? 0,
     open: s?.open_trades ?? 0,
-    winRate: s?.win_rate ?? 0,
+    winRate,
     avgProfit: s?.avg_profit ?? 0,
-    avgConfidence: s?.avg_model_confidence ?? 0,
+    avgProfitDollar,
+    avgConfidence: avgConf,
+    confToWinRate,
+    confToProfitRatio: confToWinRate,
+    exitEfficiency,
     avgPeak: 0,
     avgLeft: s?.avg_left_on_table ?? 0,
     avgDrawdown: s?.avg_drawdown_from_peak ?? 0,
@@ -363,29 +394,62 @@ function goToPage(page: number) {
 
 const confidenceVsProfitChart = computed<EChartsOption>(() => {
   const trades = closedTrades.value;
+  // Build confidence buckets for win rate line
+  const buckets = Array.from({ length: 10 }, (_, i) => ({ min: i/10, max: (i+1)/10, wins: 0, total: 0 }));
+  for (const t of trades) {
+    const idx = Math.min(9, Math.floor(t.model_confidence * 10));
+    buckets[idx].total++;
+    if ((t.close_profit ?? 0) > 0) buckets[idx].wins++;
+  }
+  const bucketLabels = buckets.map((_, i) => (i * 10 + 5) / 100); // midpoints: 0.05, 0.15, ...
+  const winRates = buckets.map((b) => b.total > 0 ? (b.wins / b.total) : null);
+
   return {
-    title: { text: 'Model Confidence vs Trade Profit', left: 'center', textStyle: { fontSize: 14 } },
-    tooltip: { trigger: 'item', formatter: (p: any) => { const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(0)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`; } },
+    title: { text: 'Confidence vs Profit & Win Rate', left: 'center', textStyle: { fontSize: 14 } },
+    tooltip: { trigger: 'item', formatter: (p: any) => {
+      if (p.seriesType === 'line') return `Conf ${(p.data[0]*100).toFixed(0)}%: Win Rate ${(p.data[1]*100).toFixed(0)}%`;
+      const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(0)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`;
+    } },
     xAxis: { name: 'Model Confidence', nameLocation: 'middle', nameGap: 30, min: 0, max: 1 },
-    yAxis: { name: 'Close Profit %', nameLocation: 'middle', nameGap: 45, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
-    series: [{ type: 'scatter', symbolSize: (d: number[]) => Math.max(6, Math.min(20, d[2]*3)),
-      data: trades.map((t) => [t.model_confidence, t.close_profit ?? 0, t.leverage, t.id, t.pair]),
-      itemStyle: { color: (p: any) => (p.data[1] >= 0 ? '#22c55e' : '#ef4444') },
-      markLine: { data: [{ yAxis: 0, lineStyle: { color: '#666', type: 'dashed' } }], silent: true } }],
+    yAxis: [
+      { name: 'Close Profit %', nameLocation: 'middle', nameGap: 45, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
+      { name: 'Win Rate %', nameLocation: 'middle', nameGap: 35, position: 'right', min: 0, max: 1, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(0)}%` }, splitLine: { show: false } },
+    ],
+    legend: { top: 30, data: ['Trades', 'Win Rate by Confidence'] },
+    series: [
+      { name: 'Trades', type: 'scatter', symbolSize: (d: number[]) => Math.max(6, Math.min(20, d[2]*3)),
+        data: trades.map((t) => [t.model_confidence, t.close_profit ?? 0, t.leverage, t.id, t.pair]),
+        itemStyle: { color: (p: any) => (p.data[1] >= 0 ? '#22c55e' : '#ef4444') },
+        markLine: { data: [{ yAxis: 0, lineStyle: { color: '#666', type: 'dashed' } }], silent: true } },
+      { name: 'Win Rate by Confidence', type: 'line', yAxisIndex: 1, smooth: true, lineStyle: { width: 3, color: '#3b82f6' }, symbol: 'circle', symbolSize: 8,
+        itemStyle: { color: '#3b82f6' },
+        data: bucketLabels.map((x, i) => winRates[i] !== null ? [x, winRates[i]] : null).filter(Boolean),
+        // Add "perfect calibration" reference line
+        markLine: { data: [[{ coord: [0, 0] }, { coord: [1, 1] }]], lineStyle: { color: '#ffffff30', type: 'dashed' }, label: { formatter: 'Perfect calibration', position: 'end', fontSize: 10 }, silent: true } },
+    ],
   };
 });
 
 const peakVsCloseChart = computed<EChartsOption>(() => {
   const trades = allTrades.value.filter((t) => t.peak_profit !== null);
+  // Calculate overall exit efficiency for the title
+  const effTrades = trades.filter((t) => !t.is_open && t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
+  const efficiency = effTrades.length > 0
+    ? effTrades.reduce((s, t) => s + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
+  const effStr = `${(efficiency * 100).toFixed(1)}%`;
   return {
-    title: { text: 'Peak Profit vs Close Profit', left: 'center', textStyle: { fontSize: 14 } },
-    tooltip: { trigger: 'item', formatter: (p: any) => { const d = p.data; return `#${d[3]} ${d[4]}<br/>Peak: ${(d[0]*100).toFixed(2)}%<br/>Close: ${(d[1]*100).toFixed(2)}%<br/>Left: ${((d[0]-d[1])*100).toFixed(2)}%`; } },
+    title: { text: `Exit Efficiency: ${effStr}  (close / peak)`, left: 'center', textStyle: { fontSize: 14 }, subtextStyle: { fontSize: 11 } },
+    tooltip: { trigger: 'item', formatter: (p: any) => {
+      const d = p.data;
+      const eff = d[0] > 0 ? ((d[1] / d[0]) * 100).toFixed(1) : 'N/A';
+      return `#${d[3]} ${d[4]}<br/>Peak: ${(d[0]*100).toFixed(2)}%<br/>Close: ${(d[1]*100).toFixed(2)}%<br/>Left: ${((d[0]-d[1])*100).toFixed(2)}%<br/>Efficiency: ${eff}%`;
+    } },
     xAxis: { name: 'Peak Profit %', nameLocation: 'middle', nameGap: 30, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
     yAxis: { name: 'Close Profit %', nameLocation: 'middle', nameGap: 45, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
     series: [{ type: 'scatter', symbolSize: 10,
       data: trades.map((t) => [t.peak_profit, t.close_profit ?? 0, t.left_on_table ?? 0, t.id, t.pair, t.is_open]),
       itemStyle: { color: (p: any) => (p.data[5] ? '#f59e0b' : p.data[1] >= 0 ? '#22c55e' : '#ef4444') },
-      markLine: { data: [[{ coord: [0, 0] }, { coord: [0.15, 0.15] }]], lineStyle: { color: '#666', type: 'dashed' }, label: { formatter: 'Perfect exit', position: 'end' }, silent: true } }],
+      markLine: { data: [[{ coord: [0, 0] }, { coord: [0.15, 0.15] }]], lineStyle: { color: '#22c55e44', type: 'dashed', width: 2 }, label: { formatter: '100% efficiency', position: 'end', fontSize: 10 }, silent: true } }],
   };
 });
 
@@ -426,6 +490,42 @@ const confidenceDistChart = computed<EChartsOption>(() => {
   };
 });
 
+function formatDuration(t: TradePerf): string {
+  let mins = t.duration_mins;
+  if (mins === null || mins === undefined) {
+    // Open trade — calculate from open_date to now
+    if (t.is_open && t.open_date) {
+      const opened = new Date(t.open_date).getTime();
+      const now = Date.now();
+      mins = Math.floor((now - opened) / 60000);
+    } else {
+      return '—';
+    }
+  }
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  if (h < 24) return `${h}h ${m}m`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return `${d}d ${rh}h`;
+}
+
+function phaseClass(phase: string | null): string {
+  switch (phase) {
+    case 'Entry':           return 'bg-red-900/50 text-red-400';        // dark red bg, bright red font — fresh trade
+    case 'Loss_Mitigation': return 'bg-red-500/30 text-red-900';        // bright red bg, dark red font — RL cutting loser
+    case 'Patience_S1':     return 'bg-red-600/30 text-red-400';        // medium red — first patience squeeze
+    case 'Patience_S2':     return 'bg-red-500/25 text-red-400';        // lighter red — second patience squeeze
+    case 'Trailing':        return 'bg-green-900/50 text-green-400';    // dark green bg, bright green font — winner trailing
+    case 'Entry_SL':        return 'bg-red-900/50 text-red-400';        // legacy v10 compat
+    case 'Stoploss':        return 'bg-red-500/20 text-red-400';        // legacy compat
+    case 'Armed_SL':        return 'bg-yellow-500/25 text-yellow-300';  // legacy compat
+    case 'RL_Exit':       return 'bg-cyan-500/25 text-cyan-300';      // cyan — model timed exit
+    default:              return 'text-surface-500';
+  }
+}
+
 function pct(v: number | null | undefined, d = 2): string { if (v === null || v === undefined) return '—'; return `${(v*100).toFixed(d)}%`; }
 </script>
 
@@ -451,11 +551,14 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Trades</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Open</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Win Rate</th>
-              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Profit</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Conf</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Win Rate / Avg Confidence — 1.0 = perfectly calibrated">Conf→Win</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Profit</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Average profit per trade in dollars">Avg $</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Close / Peak — how close to perfect exit">Exit Eff</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Peak</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Left</th>
-              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Drawdown</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg DD</th>
             </tr></thead>
             <tbody>
               <tr
@@ -468,8 +571,11 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono">{{ ps.trades }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.open > 0 ? 'text-cyan-400' : ''">{{ ps.open }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.winRate, 1) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(ps.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.confToWinRate >= 0.9 ? 'text-green-400' : ps.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ ps.confToWinRate.toFixed(2) }}x</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.8 ? 'text-green-400' : ps.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(ps.avgPeak) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
@@ -484,8 +590,11 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono">{{ allPairsSummary.trades }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.open > 0 ? 'text-cyan-400' : ''">{{ allPairsSummary.open }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.winRate, 1) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(allPairsSummary.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.confToWinRate >= 0.9 ? 'text-green-400' : allPairsSummary.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ allPairsSummary.confToWinRate.toFixed(2) }}x</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.avgProfitDollar.toFixed(2) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.exitEfficiency >= 0.8 ? 'text-green-400' : allPairsSummary.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">—</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(allPairsSummary.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(allPairsSummary.avgDrawdown) }}</td>
@@ -542,9 +651,9 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
-                <td class="p-2.5 text-center"><span class="text-sm px-1.5 py-0.5 rounded" :class="{ 'bg-green-500/20 text-green-400': t.sl_phase === 'Trailing', 'bg-yellow-500/20 text-yellow-400': t.sl_phase === 'Armed_SL', 'bg-red-500/20 text-red-400': t.sl_phase === 'Stoploss' }">{{ t.sl_phase || '—' }}</span></td>
+                <td class="p-2.5 text-center"><span class="text-sm px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase)">{{ t.sl_phase || '—' }}</span></td>
                 <td class="p-2.5 text-center max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
-                <td class="p-2.5 text-center">{{ t.duration_mins ? `${Math.floor(t.duration_mins/60)}h ${t.duration_mins%60}m` : '—' }}</td>
+                <td class="p-2.5 text-center">{{ formatDuration(t) }}</td>
               </tr>
             </tbody>
           </table>
