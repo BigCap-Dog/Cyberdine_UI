@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.5 — 2026-03-13
+
+new scoring system, enhanced tables and charts, visual enhancements
+
+
 ## v1.2.0 — 2026-03-13
 
 Performance Tab- added more stats, updated phase changes

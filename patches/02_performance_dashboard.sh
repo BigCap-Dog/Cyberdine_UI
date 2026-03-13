@@ -282,6 +282,33 @@ const filteredTrades = computed(() => {
 const closedTrades = computed(() => filteredTrades.value.filter((t) => !t.is_open));
 const allTrades = computed(() => filteredTrades.value);
 
+// Chart trade limit toggle (null = all trades)
+const chartTradeLimit = ref<number | null>(null);
+const chartTrades = computed(() => {
+  const all = [...allTrades.value].reverse(); // most recent first
+  if (chartTradeLimit.value === null) return all;
+  return all.slice(0, chartTradeLimit.value);
+});
+const chartClosedTrades = computed(() => chartTrades.value.filter((t) => !t.is_open));
+
+// Table trade limit toggle (null = all trades) — also drives charts when changed
+const tableTradeLimit = ref<number | null>(null);
+const tableTrades = computed(() => {
+  const all = perfData.value?.trades ?? [];
+  if (tableTradeLimit.value === null) return all;
+  const sorted = [...all].reverse();
+  return sorted.slice(0, tableTradeLimit.value);
+});
+
+function setTableLimit(limit: number | null) {
+  tableTradeLimit.value = limit;
+  chartTradeLimit.value = limit; // sync charts with table
+}
+
+function setChartLimit(limit: number | null) {
+  chartTradeLimit.value = limit; // charts only, don't touch table
+}
+
 // Per-pair stats aggregation
 interface PairStat {
   pair: string;
@@ -290,17 +317,19 @@ interface PairStat {
   winRate: number;
   avgProfit: number;
   avgProfitDollar: number;
+  totalProfitDollar: number;
   avgConfidence: number;
-  confToWinRate: number;      // confidence / winRate — 1.0 = perfect calibration
-  confToProfitRatio: number;  // winRate / avgConfidence — does high conf = high profit rate?
-  exitEfficiency: number;     // close_profit / peak_profit — 1.0 = perfect exit at peak
+  confToWinRate: number;
+  confToProfitRatio: number;
+  exitEfficiency: number;
   avgPeak: number;
   avgLeft: number;
   avgDrawdown: number;
+  score: number;
 }
 
 const pairStats = computed((): PairStat[] => {
-  const all = perfData.value?.trades ?? [];
+  const all = tableTrades.value;
   const pairMap: Record<string, TradePerf[]> = {};
   for (const t of all) {
     if (!pairMap[t.pair]) pairMap[t.pair] = [];
@@ -341,37 +370,92 @@ const pairStats = computed((): PairStat[] => {
     const avgDD = ddTrades.length > 0
       ? ddTrades.reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / ddTrades.length : 0;
 
-    return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgProfitDollar, avgConfidence: avgConf, confToWinRate, confToProfitRatio, exitEfficiency, avgPeak, avgLeft, avgDrawdown: avgDD };
+    const totalProfitDollar = closed.reduce((s, t) => s + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0);
+
+    return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgProfitDollar, totalProfitDollar, avgConfidence: avgConf, confToWinRate, confToProfitRatio, exitEfficiency, avgPeak, avgLeft, avgDrawdown: avgDD, score: 0 };
   });
+
+  // ── Scoring system: rank each metric 1..N, sum for composite score ──
+  const n = stats.length;
+  if (n > 1) {
+    // Columns to rank (higher = better, except avgLeft and avgDrawdown where lower = better)
+    const higherBetter: (keyof PairStat)[] = ['trades', 'winRate', 'avgProfit', 'avgProfitDollar', 'totalProfitDollar', 'confToWinRate', 'exitEfficiency', 'avgPeak'];
+    const lowerBetter: (keyof PairStat)[] = ['avgLeft', 'avgDrawdown'];
+
+    function rankColumn(arr: PairStat[], key: keyof PairStat, ascending: boolean): number[] {
+      const vals = arr.map((s, i) => ({ i, v: Number(s[key]) || 0 }));
+      // Sort worst to best: ascending=true means lowest value is worst (for higher-is-better)
+      vals.sort((a, b) => ascending ? a.v - b.v : b.v - a.v);
+      const ranks = new Array(arr.length);
+      const len = vals.length;
+      for (let r = 0; r < len; r++) {
+        // First in sorted order = worst = rank 1, last = best = rank N
+        ranks[vals[r].i] = len - r;
+      }
+      return ranks;
+    }
+
+    const scoreAccum = new Array(n).fill(0);
+    for (const key of higherBetter) {
+      const ranks = rankColumn(stats, key, false);
+      ranks.forEach((r, i) => scoreAccum[i] += r);
+    }
+    for (const key of lowerBetter) {
+      const ranks = rankColumn(stats, key, true);
+      ranks.forEach((r, i) => scoreAccum[i] += r);
+    }
+
+    // Convert to raw score sum (rank 1..N across each column, summed)
+    stats.forEach((s, i) => s.score = scoreAccum[i]);
+
+    // Sort by score descending (best at top)
+    stats.sort((a, b) => b.score - a.score);
+  }
 
   return stats;
 });
 
 const allPairsSummary = computed((): PairStat => {
-  const s = perfData.value?.summary;
-  const allClosed = (perfData.value?.trades ?? []).filter((t) => !t.is_open);
-  const avgConf = s?.avg_model_confidence ?? 0;
-  const winRate = s?.win_rate ?? 0;
+  const allData = tableTrades.value;
+  const allClosed = allData.filter((t) => !t.is_open);
+  const openCount = allData.filter((t) => t.is_open).length;
+  const wins = allClosed.filter((t) => t.close_profit && t.close_profit > 0).length;
+  const winRate = allClosed.length > 0 ? wins / allClosed.length : 0;
+  const avgProfit = allClosed.length > 0 ? allClosed.reduce((s, t) => s + (t.close_profit ?? 0), 0) / allClosed.length : 0;
+  const avgConf = allData.length > 0 ? allData.reduce((s, t) => s + t.model_confidence, 0) / allData.length : 0;
   const confToWinRate = avgConf > 0 ? winRate / avgConf : 0;
   const avgProfitDollar = allClosed.length > 0
     ? allClosed.reduce((sum, t) => sum + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0) / allClosed.length : 0;
   const effTrades = allClosed.filter((t) => t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
   const exitEfficiency = effTrades.length > 0
     ? effTrades.reduce((sum, t) => sum + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
+  const totalProfitDollar = allClosed.reduce((sum, t) => sum + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0);
+
+  // Pack tightness: how close are all pairs to each other in score
+  // Low spread = high score = coins running as a pack
+  const pScores = pairStats.value.map((p) => p.score);
+  const pMean = pScores.length > 0 ? pScores.reduce((a, b) => a + b, 0) / pScores.length : 0;
+  const pVariance = pScores.length > 1 ? pScores.reduce((s, v) => s + (v - pMean) ** 2, 0) / pScores.length : 0;
+  const pStddev = Math.sqrt(pVariance);
+  const pCv = pMean > 0 ? (pStddev / pMean) : 0;
+  const packScore = Math.round(Math.max(0, Math.min(100, (1 - pCv) * 100)));
+
   return {
     pair: 'ALL PAIRS',
-    trades: s?.total_trades ?? 0,
-    open: s?.open_trades ?? 0,
+    trades: allData.length,
+    open: openCount,
     winRate,
-    avgProfit: s?.avg_profit ?? 0,
+    avgProfit,
     avgProfitDollar,
+    totalProfitDollar,
     avgConfidence: avgConf,
     confToWinRate,
     confToProfitRatio: confToWinRate,
     exitEfficiency,
     avgPeak: 0,
-    avgLeft: s?.avg_left_on_table ?? 0,
-    avgDrawdown: s?.avg_drawdown_from_peak ?? 0,
+    avgLeft: allClosed.length > 0 ? allClosed.filter((t) => t.left_on_table !== null).reduce((s, t) => s + (t.left_on_table ?? 0), 0) / allClosed.filter((t) => t.left_on_table !== null).length : 0,
+    avgDrawdown: allClosed.length > 0 ? allClosed.filter((t) => t.drawdown_from_peak !== null).reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / allClosed.filter((t) => t.drawdown_from_peak !== null).length : 0,
+    score: packScore,
   };
 });
 
@@ -393,7 +477,7 @@ function goToPage(page: number) {
 }
 
 const confidenceVsProfitChart = computed<EChartsOption>(() => {
-  const trades = closedTrades.value;
+  const trades = chartClosedTrades.value;
   // Build confidence buckets for win rate line
   const buckets = Array.from({ length: 10 }, (_, i) => ({ min: i/10, max: (i+1)/10, wins: 0, total: 0 }));
   for (const t of trades) {
@@ -405,7 +489,7 @@ const confidenceVsProfitChart = computed<EChartsOption>(() => {
   const winRates = buckets.map((b) => b.total > 0 ? (b.wins / b.total) : null);
 
   return {
-    title: { text: 'Confidence vs Profit & Win Rate', left: 'center', textStyle: { fontSize: 14 } },
+    title: { text: 'Confidence vs Profit & Win Rate', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'item', formatter: (p: any) => {
       if (p.seriesType === 'line') return `Conf ${(p.data[0]*100).toFixed(0)}%: Win Rate ${(p.data[1]*100).toFixed(0)}%`;
       const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(0)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`;
@@ -425,20 +509,20 @@ const confidenceVsProfitChart = computed<EChartsOption>(() => {
         itemStyle: { color: '#3b82f6' },
         data: bucketLabels.map((x, i) => winRates[i] !== null ? [x, winRates[i]] : null).filter(Boolean),
         // Add "perfect calibration" reference line
-        markLine: { data: [[{ coord: [0, 0] }, { coord: [1, 1] }]], lineStyle: { color: '#ffffff30', type: 'dashed' }, label: { formatter: 'Perfect calibration', position: 'end', fontSize: 10 }, silent: true } },
+        markLine: { data: [[{ coord: [0, 0] }, { coord: [1, 1] }]], lineStyle: { color: '#ffffff30', type: 'dashed' }, label: { formatter: 'Perfect calibration', position: 'insideEndTop', fontSize: 11, color: '#ffffff80', distance: 10 }, silent: true } },
     ],
   };
 });
 
 const peakVsCloseChart = computed<EChartsOption>(() => {
-  const trades = allTrades.value.filter((t) => t.peak_profit !== null);
+  const trades = chartTrades.value.filter((t) => t.peak_profit !== null);
   // Calculate overall exit efficiency for the title
   const effTrades = trades.filter((t) => !t.is_open && t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
   const efficiency = effTrades.length > 0
     ? effTrades.reduce((s, t) => s + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
   const effStr = `${(efficiency * 100).toFixed(1)}%`;
   return {
-    title: { text: `Exit Efficiency: ${effStr}  (close / peak)`, left: 'center', textStyle: { fontSize: 14 }, subtextStyle: { fontSize: 11 } },
+    title: { text: `Exit Efficiency: ${effStr}  (close / peak)`, left: 'center', textStyle: { fontSize: 18 }, subtextStyle: { fontSize: 14 } },
     tooltip: { trigger: 'item', formatter: (p: any) => {
       const d = p.data;
       const eff = d[0] > 0 ? ((d[1] / d[0]) * 100).toFixed(1) : 'N/A';
@@ -454,10 +538,10 @@ const peakVsCloseChart = computed<EChartsOption>(() => {
 });
 
 const tradeJourneyChart = computed<EChartsOption>(() => {
-  const trades = allTrades.value.filter((t) => t.peak_profit !== null || t.trough_profit !== null);
+  const trades = chartTrades.value.filter((t) => t.peak_profit !== null || t.trough_profit !== null);
   const ids = trades.map((t) => `#${t.id}`);
   return {
-    title: { text: 'Trade Journey: Peak / Close / Trough', left: 'center', textStyle: { fontSize: 14 } },
+    title: { text: 'Trade Journey: Peak / Close / Trough', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, formatter: (params: any) => {
       const t = trades[params[0]?.dataIndex]; if (!t) return '';
       return `<b>#${t.id} ${t.pair}</b> (${t.enter_tag})<br/>Peak: ${((t.peak_profit??0)*100).toFixed(2)}%<br/>Close: ${((t.close_profit??0)*100).toFixed(2)}%<br/>Trough: ${((t.trough_profit??0)*100).toFixed(2)}%<br/>Exit: ${t.exit_tag||t.exit_reason||'open'}<br/>Conf: ${(t.model_confidence*100).toFixed(0)}%`;
@@ -475,9 +559,9 @@ const tradeJourneyChart = computed<EChartsOption>(() => {
 
 const confidenceDistChart = computed<EChartsOption>(() => {
   const buckets = Array.from({ length: 10 }, (_, i) => ({ label: `${i*10}-${(i+1)*10}%`, min: i/10, max: (i+1)/10, wins: 0, losses: 0, total: 0 }));
-  for (const t of allTrades.value) { const idx = Math.min(9, Math.floor(t.model_confidence * 10)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
+  for (const t of chartTrades.value) { const idx = Math.min(9, Math.floor(t.model_confidence * 10)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
   return {
-    title: { text: 'Confidence Distribution & Win Rate', left: 'center', textStyle: { fontSize: 14 } },
+    title: { text: 'Confidence Distribution & Win Rate', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'axis' },
     xAxis: { type: 'category', data: buckets.map((b) => b.label) },
     yAxis: [{ name: 'Count', type: 'value' }, { name: 'Win Rate %', type: 'value', max: 100, axisLabel: { formatter: '{value}%' } }],
@@ -532,7 +616,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
 <template>
   <div class="p-4 h-full overflow-y-auto">
     <div class="flex items-center justify-between mb-4">
-      <h1 class="text-2xl font-bold">Model Performance</h1>
+      <h1 class="text-3xl font-bold">Model Performance</h1>
       <Button size="small" @click="fetchPerformance" :loading="loading"><i-mdi-refresh class="mr-1" /> Refresh</Button>
     </div>
     <div v-if="error" class="bg-red-500/20 text-red-400 p-3 rounded mb-4">{{ error }}</div>
@@ -541,12 +625,37 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
       <!-- ═══ TOP: Pair Stats Breakdown Table ═══ -->
       <div class="bg-surface-800 rounded-lg p-4 mb-6">
         <div class="flex items-center justify-between mb-3">
-          <h2 class="text-lg font-semibold">Pair Breakdown</h2>
-          <span v-if="selectedPair" class="text-sm text-primary-400 cursor-pointer" @click="selectPair(null)">← Show All Pairs</span>
+          <div class="flex items-center gap-3">
+            <h2 class="text-xl font-semibold">Pair Breakdown</h2>
+            <span v-if="selectedPair" class="text-base text-primary-400 cursor-pointer" @click="selectPair(null)">← Show All Pairs</span>
+          </div>
+          <div class="flex items-center gap-1">
+            <span class="text-base text-surface-400 mr-2">Show:</span>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="tableTradeLimit === null ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setTableLimit(null)"
+            >All</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="tableTradeLimit === 100 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setTableLimit(100)"
+            >Last 100</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="tableTradeLimit === 50 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setTableLimit(50)"
+            >Last 50</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="tableTradeLimit === 10 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setTableLimit(10)"
+            >Last 10</button>
+          </div>
         </div>
         <div class="overflow-x-auto">
-          <table class="w-full" style="font-size: 0.9rem;">
-            <thead><tr class="border-b-2 border-surface-500" style="font-size: 0.85rem;">
+          <table class="w-full" style="font-size: 1.125rem;">
+            <thead><tr class="border-b-2 border-surface-500" style="font-size: 1.06rem;">
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Pair</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Trades</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Open</th>
@@ -555,14 +664,16 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Win Rate / Avg Confidence — 1.0 = perfectly calibrated">Conf→Win</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Profit</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Average profit per trade in dollars">Avg $</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Total profit from all closed trades">Total $</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Close / Peak — how close to perfect exit">Exit Eff</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Peak</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Left</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg DD</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Efficiency score — comparable across rigs with different coin counts">Score</th>
             </tr></thead>
             <tbody>
               <tr
-                v-for="ps in pairStats" :key="ps.pair"
+                v-for="ps in [...pairStats].sort((a, b) => b.score - a.score)" :key="ps.pair"
                 class="border-b border-surface-700 cursor-pointer transition-colors"
                 :class="selectedPair === ps.pair ? 'bg-primary-500/15 border-primary-500/30' : 'hover:bg-surface-700/50'"
                 @click="selectPair(ps.pair)"
@@ -575,10 +686,12 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="ps.confToWinRate >= 0.9 ? 'text-green-400' : ps.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ ps.confToWinRate.toFixed(2) }}x</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
+                <td class="p-2.5 text-center font-mono font-semibold" :class="ps.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.totalProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.8 ? 'text-green-400' : ps.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(ps.avgPeak) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
+                <td class="p-2.5 text-center font-mono font-bold" :class="ps.score >= pairStats[0]?.score * 0.8 ? 'text-green-400' : ps.score >= pairStats[0]?.score * 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ ps.score }} ({{ Math.round(ps.score / (pairStats.length * 10) * 100) }}%)</td>
               </tr>
               <!-- ALL PAIRS summary row -->
               <tr
@@ -594,10 +707,12 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.confToWinRate >= 0.9 ? 'text-green-400' : allPairsSummary.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ allPairsSummary.confToWinRate.toFixed(2) }}x</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.avgProfitDollar.toFixed(2) }}</td>
+                <td class="p-2.5 text-center font-mono font-semibold" :class="allPairsSummary.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.totalProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.exitEfficiency >= 0.8 ? 'text-green-400' : allPairsSummary.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">—</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(allPairsSummary.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(allPairsSummary.avgDrawdown) }}</td>
+                <td class="p-2.5 text-center font-mono font-bold" :class="allPairsSummary.score >= 75 ? 'text-green-400' : allPairsSummary.score >= 50 ? 'text-yellow-400' : 'text-red-400'">{{ allPairsSummary.score }}%</td>
               </tr>
             </tbody>
           </table>
@@ -605,26 +720,54 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
       </div>
 
       <!-- ═══ MIDDLE: Charts ═══ -->
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="confidenceVsProfitChart" :theme="theme" autoresize class="w-full h-full" /></div>
-        <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="peakVsCloseChart" :theme="theme" autoresize class="w-full h-full" /></div>
-        <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="tradeJourneyChart" :theme="theme" autoresize class="w-full h-full" /></div>
-        <div class="bg-surface-800 rounded-lg p-3 h-80"><ECharts :option="confidenceDistChart" :theme="theme" autoresize class="w-full h-full" /></div>
+      <div class="mb-6">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-xl font-semibold">Charts</h2>
+          <div class="flex items-center gap-1">
+            <span class="text-base text-surface-400 mr-2">Show:</span>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="chartTradeLimit === null ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setChartLimit(null)"
+            >All</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="chartTradeLimit === 100 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setChartLimit(100)"
+            >Last 100</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="chartTradeLimit === 50 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setChartLimit(50)"
+            >Last 50</button>
+            <button
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
+              :class="chartTradeLimit === 10 ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
+              @click="setChartLimit(10)"
+            >Last 10</button>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div class="bg-surface-800 rounded-lg p-3 h-96"><ECharts :option="confidenceVsProfitChart" :theme="theme" autoresize class="w-full h-full" /></div>
+          <div class="bg-surface-800 rounded-lg p-3 h-96"><ECharts :option="peakVsCloseChart" :theme="theme" autoresize class="w-full h-full" /></div>
+          <div class="bg-surface-800 rounded-lg p-3 h-96"><ECharts :option="tradeJourneyChart" :theme="theme" autoresize class="w-full h-full" /></div>
+          <div class="bg-surface-800 rounded-lg p-3 h-96"><ECharts :option="confidenceDistChart" :theme="theme" autoresize class="w-full h-full" /></div>
+        </div>
       </div>
 
       <!-- Trade Details Table — Paginated, larger font -->
       <div class="bg-surface-800 rounded-lg p-4">
         <div class="flex items-center justify-between mb-3">
-          <h2 class="text-lg font-semibold">Trade Details</h2>
-          <div class="flex items-center gap-2 text-sm">
+          <h2 class="text-xl font-semibold">Trade Details</h2>
+          <div class="flex items-center gap-2 text-base">
             <span class="text-surface-400">{{ allTrades.length }} trades</span>
             <span class="text-surface-500">|</span>
             <span class="text-surface-400">Page {{ currentPage }} of {{ totalPages }}</span>
           </div>
         </div>
         <div class="overflow-x-auto">
-          <table class="w-full" style="font-size: 0.93rem;">
-            <thead><tr class="border-b-2 border-surface-500" style="font-size: 0.88rem;">
+          <table class="w-full" style="font-size: 1.16rem;">
+            <thead><tr class="border-b-2 border-surface-500" style="font-size: 1.1rem;">
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">#</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Pair</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Dir</th>
@@ -651,7 +794,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
-                <td class="p-2.5 text-center"><span class="text-sm px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase)">{{ t.sl_phase || '—' }}</span></td>
+                <td class="p-2.5 text-center"><span class="px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase)">{{ t.sl_phase || '—' }}</span></td>
                 <td class="p-2.5 text-center max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
                 <td class="p-2.5 text-center">{{ formatDuration(t) }}</td>
               </tr>
@@ -662,13 +805,13 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
         <!-- Pagination controls -->
         <div v-if="totalPages > 1" class="flex items-center justify-center gap-2 mt-4 pt-3 border-t border-surface-700">
           <button
-            class="px-3 py-1.5 rounded text-sm font-semibold transition-colors"
+            class="px-3 py-1.5 rounded text-base font-semibold transition-colors"
             :class="currentPage === 1 ? 'text-surface-600 cursor-not-allowed' : 'text-surface-300 hover:bg-surface-700 cursor-pointer'"
             :disabled="currentPage === 1"
             @click="goToPage(1)"
           >« First</button>
           <button
-            class="px-3 py-1.5 rounded text-sm font-semibold transition-colors"
+            class="px-3 py-1.5 rounded text-base font-semibold transition-colors"
             :class="currentPage === 1 ? 'text-surface-600 cursor-not-allowed' : 'text-surface-300 hover:bg-surface-700 cursor-pointer'"
             :disabled="currentPage === 1"
             @click="goToPage(currentPage - 1)"
@@ -677,7 +820,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
           <template v-for="p in totalPages" :key="p">
             <button
               v-if="p === 1 || p === totalPages || (p >= currentPage - 2 && p <= currentPage + 2)"
-              class="px-3 py-1.5 rounded text-sm font-semibold transition-colors cursor-pointer"
+              class="px-3 py-1.5 rounded text-base font-semibold transition-colors cursor-pointer"
               :class="p === currentPage ? 'bg-primary-500/30 text-primary-400 border border-primary-500/50' : 'text-surface-300 hover:bg-surface-700'"
               @click="goToPage(p)"
             >{{ p }}</button>
@@ -688,13 +831,13 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
           </template>
 
           <button
-            class="px-3 py-1.5 rounded text-sm font-semibold transition-colors"
+            class="px-3 py-1.5 rounded text-base font-semibold transition-colors"
             :class="currentPage === totalPages ? 'text-surface-600 cursor-not-allowed' : 'text-surface-300 hover:bg-surface-700 cursor-pointer'"
             :disabled="currentPage === totalPages"
             @click="goToPage(currentPage + 1)"
           >Next ›</button>
           <button
-            class="px-3 py-1.5 rounded text-sm font-semibold transition-colors"
+            class="px-3 py-1.5 rounded text-base font-semibold transition-colors"
             :class="currentPage === totalPages ? 'text-surface-600 cursor-not-allowed' : 'text-surface-300 hover:bg-surface-700 cursor-pointer'"
             :disabled="currentPage === totalPages"
             @click="goToPage(totalPages)"
