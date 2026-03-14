@@ -91,7 +91,7 @@ new_dark = '''  .ft-dark-theme {
       --p-content-background: #070b10;
       --p-menu-background: #0a0f16;
 
-      --p-primary-contrast-color: #e8edf4;
+      --p-primary-contrast-color: #030508;
       --p-button-secondary-background: #161e2b;
       --p-button-secondary-hover-background: #1e2836;
 
@@ -125,6 +125,43 @@ new_html = '''html {
 
 html.ft-dark-theme, .ft-dark-theme body {
     background-color: #030508;
+}
+
+/* ── Cyberdine UI overrides ── */
+
+/* Selected pair in trade page pair list — teal bg, visible text */
+.ft-dark-theme .p-listbox-option[data-p-selected="true"],
+.ft-dark-theme .p-listbox-option.p-focus,
+.ft-dark-theme .p-listbox-option[aria-selected="true"] {
+    background-color: rgba(0, 180, 230, 0.15) !important;
+    border-left: 3px solid #00d4ff !important;
+}
+
+/* Active/selected items in any list — ensure contrast */
+.ft-dark-theme .p-highlight {
+    background-color: rgba(0, 180, 230, 0.12) !important;
+    color: #e8edf4 !important;
+}
+
+/* Primary button and badge backgrounds — ensure dark text on bright bg */
+.ft-dark-theme .bg-primary-500,
+.ft-dark-theme .bg-primary-400 {
+    color: #030508 !important;
+}
+
+/* Active nav tab — force black bold text on cyan */
+.ft-dark-theme a.bg-\[\#00d4ff\],
+.ft-dark-theme .router-link-active.bg-\[\#00d4ff\] {
+    color: #000000 !important;
+    font-weight: 900 !important;
+}
+
+/* Fix washed out text in surface areas */
+.ft-dark-theme .text-surface-400 {
+    color: #8899aa !important;
+}
+.ft-dark-theme .text-surface-300 {
+    color: #a0b0c0 !important;
 }'''
 
 content = content.replace(old_html, new_html)
@@ -175,7 +212,7 @@ with open('$NAVBAR_FILE', 'r') as f:
 # Replace the active-class on nav links for bright blue highlight style
 content = content.replace(
     'active-class=\"underline\"',
-    'active-class=\"bg-[#00d4ff] text-[#030508] font-bold rounded px-2 no-underline\"'
+    'active-class=\"bg-[#00d4ff] text-[#000000] font-black rounded px-2 no-underline\"'
 )
 
 # Reorder: move Dashboard before Trade

@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.95 — 2026-03-14
+
+Skin fixes: black text on active nav tabs and selected pair list, improved contrast for primary highlights and surface text
+
+
 ## v1.3.9 — 2026-03-14
 
 Performance dashboard v2: pair scoring system with pack tightness, exit efficiency (1-left/peak), confidence calibration chart, avg/total $ from actual PnL, chart toggles (All/100/50/10), open trades show unrealized PnL, 6 phase colors, 25% larger fonts, 20% taller charts, trade journey most recent on right
