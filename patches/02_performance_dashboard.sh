@@ -79,6 +79,20 @@ method_code = '''
                 trough_profit = None
 
             close_profit = float(t.close_profit) if t.close_profit else None
+            close_profit_abs_val = float(t.close_profit_abs) if t.close_profit_abs is not None else None
+
+            # For open trades, calculate unrealized profit from current rate
+            if t.is_open and close_profit is None:
+                try:
+                    current_rate = float(t.close_rate) if t.close_rate else None
+                    if current_rate is None and max_rate:
+                        # Use last known rate as approximation
+                        current_rate = float(max_rate)
+                    if current_rate and current_rate > 0:
+                        close_profit = t.calc_profit_ratio(current_rate)
+                        close_profit_abs_val = float(t.calculate_profit(current_rate).profit_abs) if hasattr(t, 'calculate_profit') else None
+                except Exception:
+                    pass
             open_rate = float(t.open_rate) if t.open_rate else 0
             close_rate = float(t.close_rate) if t.close_rate else None
             max_rate = float(t.max_rate) if t.max_rate else None
@@ -115,6 +129,7 @@ method_code = '''
                 "open_rate": open_rate,
                 "close_rate": close_rate,
                 "close_profit": close_profit,
+                "close_profit_abs": close_profit_abs_val if close_profit_abs_val is not None else (float(close_profit * t.stake_amount * t.leverage) if close_profit and t.stake_amount else None),
                 "max_rate": max_rate,
                 "min_rate": min_rate,
                 "max_potential_profit": max_potential,
@@ -229,7 +244,7 @@ interface TradePerf {
   id: number; pair: string; direction: string; is_open: boolean;
   model_confidence: number; enter_tag: string; leverage: number;
   stake_amount: number; open_rate: number; close_rate: number | null;
-  close_profit: number | null; max_rate: number | null; min_rate: number | null;
+  close_profit: number | null; close_profit_abs: number | null; max_rate: number | null; min_rate: number | null;
   max_potential_profit: number | null; peak_profit: number | null;
   trough_profit: number | null; left_on_table: number | null;
   drawdown_from_peak: number | null; sl_phase: string | null;
@@ -293,6 +308,7 @@ const chartClosedTrades = computed(() => chartTrades.value.filter((t) => !t.is_o
 
 // Table trade limit toggle (null = all trades) — also drives charts when changed
 const tableTradeLimit = ref<number | null>(null);
+const packTightnessScore = ref(0);
 const tableTrades = computed(() => {
   const all = perfData.value?.trades ?? [];
   if (tableTradeLimit.value === null) return all;
@@ -329,7 +345,7 @@ interface PairStat {
 }
 
 const pairStats = computed((): PairStat[] => {
-  const all = tableTrades.value;
+  const all = perfData.value?.trades ?? [];
   const pairMap: Record<string, TradePerf[]> = {};
   for (const t of all) {
     if (!pairMap[t.pair]) pairMap[t.pair] = [];
@@ -345,7 +361,7 @@ const pairStats = computed((): PairStat[] => {
     const avgProfit = closed.length > 0
       ? closed.reduce((s, t) => s + (t.close_profit ?? 0), 0) / closed.length : 0;
     const avgProfitDollar = closed.length > 0
-      ? closed.reduce((s, t) => s + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0) / closed.length : 0;
+      ? closed.reduce((s, t) => s + (t.close_profit_abs ?? 0), 0) / closed.length : 0;
     const avgConf = trades.length > 0
       ? trades.reduce((s, t) => s + t.model_confidence, 0) / trades.length : 0;
 
@@ -354,23 +370,21 @@ const pairStats = computed((): PairStat[] => {
     // Confidence to profit: does high confidence translate to profit?
     const confToProfitRatio = avgConf > 0 ? winRate / avgConf : 0;
 
-    // Exit efficiency: how close does the model exit to peak profit?
-    // efficiency = avg(close_profit / peak_profit) for winning trades with positive peak
-    const effTrades = closed.filter((t) => t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
-    const exitEfficiency = effTrades.length > 0
-      ? effTrades.reduce((s, t) => s + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
-
     const peakTrades = closed.filter((t) => t.peak_profit !== null);
     const avgPeak = peakTrades.length > 0
       ? peakTrades.reduce((s, t) => s + (t.peak_profit ?? 0), 0) / peakTrades.length : 0;
     const leftTrades = closed.filter((t) => t.left_on_table !== null);
     const avgLeft = leftTrades.length > 0
       ? leftTrades.reduce((s, t) => s + (t.left_on_table ?? 0), 0) / leftTrades.length : 0;
+
+    // Exit efficiency: 1 - (avgLeft / avgPeak) — how much of peak profit was captured
+    const exitEfficiency = avgPeak > 0 ? 1 - (avgLeft / avgPeak) : 0;
+
     const ddTrades = closed.filter((t) => t.drawdown_from_peak !== null);
     const avgDD = ddTrades.length > 0
       ? ddTrades.reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / ddTrades.length : 0;
 
-    const totalProfitDollar = closed.reduce((s, t) => s + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0);
+    const totalProfitDollar = closed.reduce((s, t) => s + (t.close_profit_abs ?? 0), 0);
 
     return { pair, trades: trades.length, open: openCount, winRate, avgProfit, avgProfitDollar, totalProfitDollar, avgConfidence: avgConf, confToWinRate, confToProfitRatio, exitEfficiency, avgPeak, avgLeft, avgDrawdown: avgDD, score: 0 };
   });
@@ -416,36 +430,23 @@ const pairStats = computed((): PairStat[] => {
 });
 
 const allPairsSummary = computed((): PairStat => {
-  const allData = tableTrades.value;
-  const allClosed = allData.filter((t) => !t.is_open);
-  const openCount = allData.filter((t) => t.is_open).length;
-  const wins = allClosed.filter((t) => t.close_profit && t.close_profit > 0).length;
-  const winRate = allClosed.length > 0 ? wins / allClosed.length : 0;
-  const avgProfit = allClosed.length > 0 ? allClosed.reduce((s, t) => s + (t.close_profit ?? 0), 0) / allClosed.length : 0;
-  const avgConf = allData.length > 0 ? allData.reduce((s, t) => s + t.model_confidence, 0) / allData.length : 0;
+  const s = perfData.value?.summary;
+  const allClosed = (perfData.value?.trades ?? []).filter((t) => !t.is_open);
+  const avgConf = s?.avg_model_confidence ?? 0;
+  const winRate = s?.win_rate ?? 0;
   const confToWinRate = avgConf > 0 ? winRate / avgConf : 0;
   const avgProfitDollar = allClosed.length > 0
-    ? allClosed.reduce((sum, t) => sum + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0) / allClosed.length : 0;
-  const effTrades = allClosed.filter((t) => t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
-  const exitEfficiency = effTrades.length > 0
-    ? effTrades.reduce((sum, t) => sum + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
-  const totalProfitDollar = allClosed.reduce((sum, t) => sum + ((t.close_profit ?? 0) * t.stake_amount * t.leverage), 0);
-
-  // Pack tightness: how close are all pairs to each other in score
-  // Low spread = high score = coins running as a pack
-  const pScores = pairStats.value.map((p) => p.score);
-  const pMean = pScores.length > 0 ? pScores.reduce((a, b) => a + b, 0) / pScores.length : 0;
-  const pVariance = pScores.length > 1 ? pScores.reduce((s, v) => s + (v - pMean) ** 2, 0) / pScores.length : 0;
-  const pStddev = Math.sqrt(pVariance);
-  const pCv = pMean > 0 ? (pStddev / pMean) : 0;
-  const packScore = Math.round(Math.max(0, Math.min(100, (1 - pCv) * 100)));
-
+    ? allClosed.reduce((a, t) => a + (t.close_profit_abs ?? 0), 0) / allClosed.length : 0;
+  const totalProfitDollar = allClosed.reduce((a, t) => a + (t.close_profit_abs ?? 0), 0);
+  const avgPeakVal = s?.avg_left_on_table !== undefined && s?.avg_profit !== undefined
+    ? (s.avg_profit + s.avg_left_on_table) : 0;
+  const exitEfficiency = avgPeakVal > 0 ? 1 - ((s?.avg_left_on_table ?? 0) / avgPeakVal) : 0;
   return {
     pair: 'ALL PAIRS',
-    trades: allData.length,
-    open: openCount,
+    trades: s?.total_trades ?? 0,
+    open: s?.open_trades ?? 0,
     winRate,
-    avgProfit,
+    avgProfit: s?.avg_profit ?? 0,
     avgProfitDollar,
     totalProfitDollar,
     avgConfidence: avgConf,
@@ -453,10 +454,19 @@ const allPairsSummary = computed((): PairStat => {
     confToProfitRatio: confToWinRate,
     exitEfficiency,
     avgPeak: 0,
-    avgLeft: allClosed.length > 0 ? allClosed.filter((t) => t.left_on_table !== null).reduce((s, t) => s + (t.left_on_table ?? 0), 0) / allClosed.filter((t) => t.left_on_table !== null).length : 0,
-    avgDrawdown: allClosed.length > 0 ? allClosed.filter((t) => t.drawdown_from_peak !== null).reduce((s, t) => s + (t.drawdown_from_peak ?? 0), 0) / allClosed.filter((t) => t.drawdown_from_peak !== null).length : 0,
-    score: packScore,
+    avgLeft: s?.avg_left_on_table ?? 0,
+    avgDrawdown: s?.avg_drawdown_from_peak ?? 0,
+    score: 0,
   };
+});
+
+watch(pairStats, (stats) => {
+  if (stats.length < 2) { packTightnessScore.value = 100; return; }
+  const sc = stats.map((s) => s.score);
+  const mean = sc.reduce((a, b) => a + b, 0) / sc.length;
+  const variance = sc.reduce((a, v) => a + (v - mean) ** 2, 0) / sc.length;
+  const cv = mean > 0 ? Math.sqrt(variance) / mean : 0;
+  packTightnessScore.value = Math.round(Math.max(0, Math.min(100, (1 - cv) * 100)));
 });
 
 function selectPair(pair: string | null) {
@@ -468,7 +478,18 @@ function selectPair(pair: string | null) {
 const totalPages = computed(() => Math.ceil(allTrades.value.length / pageSize));
 const paginatedTrades = computed(() => {
   const start = (currentPage.value - 1) * pageSize;
-  const sorted = [...allTrades.value].reverse();
+  // Open trades first, then closed sorted by close_date descending
+  const openTrades = allTrades.value.filter((t) => t.is_open).sort((a, b) => {
+    const da = a.open_date ? new Date(a.open_date).getTime() : 0;
+    const db = b.open_date ? new Date(b.open_date).getTime() : 0;
+    return db - da;
+  });
+  const closedTrades = allTrades.value.filter((t) => !t.is_open).sort((a, b) => {
+    const da = a.close_date ? new Date(a.close_date).getTime() : 0;
+    const db = b.close_date ? new Date(b.close_date).getTime() : 0;
+    return db - da;
+  });
+  const sorted = [...openTrades, ...closedTrades];
   return sorted.slice(start, start + pageSize);
 });
 
@@ -516,13 +537,15 @@ const confidenceVsProfitChart = computed<EChartsOption>(() => {
 
 const peakVsCloseChart = computed<EChartsOption>(() => {
   const trades = chartTrades.value.filter((t) => t.peak_profit !== null);
-  // Calculate overall exit efficiency for the title
-  const effTrades = trades.filter((t) => !t.is_open && t.peak_profit && t.peak_profit > 0 && t.close_profit !== null);
-  const efficiency = effTrades.length > 0
-    ? effTrades.reduce((s, t) => s + ((t.close_profit ?? 0) / (t.peak_profit ?? 1)), 0) / effTrades.length : 0;
+  // Calculate overall exit efficiency: 1 - (avgLeft / avgPeak)
+  const closedWithPeak = trades.filter((t) => !t.is_open && t.peak_profit && t.peak_profit > 0);
+  const chartAvgPeak = closedWithPeak.length > 0 ? closedWithPeak.reduce((s, t) => s + (t.peak_profit ?? 0), 0) / closedWithPeak.length : 0;
+  const closedWithLeft = trades.filter((t) => !t.is_open && t.left_on_table !== null);
+  const chartAvgLeft = closedWithLeft.length > 0 ? closedWithLeft.reduce((s, t) => s + (t.left_on_table ?? 0), 0) / closedWithLeft.length : 0;
+  const efficiency = chartAvgPeak > 0 ? 1 - (chartAvgLeft / chartAvgPeak) : 0;
   const effStr = `${(efficiency * 100).toFixed(1)}%`;
   return {
-    title: { text: `Exit Efficiency: ${effStr}  (close / peak)`, left: 'center', textStyle: { fontSize: 18 }, subtextStyle: { fontSize: 14 } },
+    title: { text: `Exit Efficiency: ${effStr}  (1 − left/peak)`, left: 'center', textStyle: { fontSize: 18 }, subtextStyle: { fontSize: 14 } },
     tooltip: { trigger: 'item', formatter: (p: any) => {
       const d = p.data;
       const eff = d[0] > 0 ? ((d[1] / d[0]) * 100).toFixed(1) : 'N/A';
@@ -538,7 +561,7 @@ const peakVsCloseChart = computed<EChartsOption>(() => {
 });
 
 const tradeJourneyChart = computed<EChartsOption>(() => {
-  const trades = chartTrades.value.filter((t) => t.peak_profit !== null || t.trough_profit !== null);
+  const trades = [...chartTrades.value.filter((t) => t.peak_profit !== null || t.trough_profit !== null)].reverse();
   const ids = trades.map((t) => `#${t.id}`);
   return {
     title: { text: 'Trade Journey: Peak / Close / Trough', left: 'center', textStyle: { fontSize: 18 } },
@@ -598,7 +621,7 @@ function formatDuration(t: TradePerf): string {
 function phaseClass(phase: string | null): string {
   switch (phase) {
     case 'Entry':           return 'bg-red-900/50 text-red-400';        // dark red bg, bright red font — fresh trade
-    case 'Loss_Mitigation': return 'bg-red-500/30 text-red-900';        // bright red bg, dark red font — RL cutting loser
+    case 'Loss_Mitigation': return 'bg-red-900/50 text-red-950';        // bright red bg, dark red font — RL cutting loser
     case 'Patience_S1':     return 'bg-red-600/30 text-red-400';        // medium red — first patience squeeze
     case 'Patience_S2':     return 'bg-red-500/25 text-red-400';        // lighter red — second patience squeeze
     case 'Trailing':        return 'bg-green-900/50 text-green-400';    // dark green bg, bright green font — winner trailing
@@ -665,7 +688,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Profit</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Average profit per trade in dollars">Avg $</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Total profit from all closed trades">Total $</th>
-              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Close / Peak — how close to perfect exit">Exit Eff</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="Close profit / Peak profit — 100% = perfect exit, 0% = gave it all back, negative = lost more than peak">Exit Eff</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Peak</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg Left</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Avg DD</th>
@@ -687,7 +710,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono font-semibold" :class="ps.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.totalProfitDollar.toFixed(2) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.8 ? 'text-green-400' : ps.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.7 ? 'text-green-400' : ps.exitEfficiency >= 0 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(ps.avgPeak) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
@@ -708,11 +731,11 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.avgProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono font-semibold" :class="allPairsSummary.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.totalProfitDollar.toFixed(2) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.exitEfficiency >= 0.8 ? 'text-green-400' : allPairsSummary.exitEfficiency >= 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.exitEfficiency, 1) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.exitEfficiency >= 0.7 ? 'text-green-400' : allPairsSummary.exitEfficiency >= 0 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.exitEfficiency, 1) }}</td>
                 <td class="p-2.5 text-center font-mono text-green-400">—</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(allPairsSummary.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(allPairsSummary.avgDrawdown) }}</td>
-                <td class="p-2.5 text-center font-mono font-bold" :class="allPairsSummary.score >= 75 ? 'text-green-400' : allPairsSummary.score >= 50 ? 'text-yellow-400' : 'text-red-400'">{{ allPairsSummary.score }}%</td>
+                <td class="p-2.5 text-center font-mono font-bold" :class="packTightnessScore >= 75 ? 'text-green-400' : packTightnessScore >= 50 ? 'text-yellow-400' : 'text-red-400'">{{ packTightnessScore }}%</td>
               </tr>
             </tbody>
           </table>
@@ -790,7 +813,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono">{{ (t.model_confidence*100).toFixed(0) }}%</td>
                 <td class="p-2.5 text-center">{{ t.leverage }}x</td>
                 <td class="p-2.5 text-center font-mono">${{ t.stake_amount.toFixed(1) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.is_open ? 'open' : pct(t.close_profit) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.close_profit !== null ? pct(t.close_profit) : '—' }}<span v-if="t.is_open" class="text-xs text-cyan-400 ml-1">●</span></td>
                 <td class="p-2.5 text-center font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
