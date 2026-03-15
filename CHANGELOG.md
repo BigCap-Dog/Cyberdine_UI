@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.3.96 — 2026-03-15
+
+Fix pair table toggles, open trade unrealized PnL from live candle data, avg peak negative color
+
+
 ## v1.3.95 — 2026-03-14
 
 Skin fixes: black text on active nav tabs and selected pair list, improved contrast for primary highlights and surface text

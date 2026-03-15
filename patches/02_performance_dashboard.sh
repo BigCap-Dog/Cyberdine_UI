@@ -81,22 +81,27 @@ method_code = '''
             close_profit = float(t.close_profit) if t.close_profit else None
             close_profit_abs_val = float(t.close_profit_abs) if t.close_profit_abs is not None else None
 
-            # For open trades, calculate unrealized profit from current rate
-            if t.is_open and close_profit is None:
-                try:
-                    current_rate = float(t.close_rate) if t.close_rate else None
-                    if current_rate is None and max_rate:
-                        # Use last known rate as approximation
-                        current_rate = float(max_rate)
-                    if current_rate and current_rate > 0:
-                        close_profit = t.calc_profit_ratio(current_rate)
-                        close_profit_abs_val = float(t.calculate_profit(current_rate).profit_abs) if hasattr(t, 'calculate_profit') else None
-                except Exception:
-                    pass
             open_rate = float(t.open_rate) if t.open_rate else 0
             close_rate = float(t.close_rate) if t.close_rate else None
             max_rate = float(t.max_rate) if t.max_rate else None
             min_rate = float(t.min_rate) if t.min_rate else None
+
+            # For open trades, calculate unrealized profit from current rate
+            if t.is_open and close_profit is None:
+                try:
+                    # Try to get current rate from dataprovider
+                    dp = self._freqtrade.dataprovider
+                    df = dp.ohlcv(t.pair, self._freqtrade.config.get('timeframe', '5m'))
+                    if df is not None and not df.empty:
+                        current_rate = float(df.iloc[-1]['close'])
+                    else:
+                        current_rate = max_rate  # fallback
+                    if current_rate and current_rate > 0:
+                        close_profit = t.calc_profit_ratio(current_rate)
+                        if hasattr(t, 'calculate_profit'):
+                            close_profit_abs_val = float(t.calculate_profit(current_rate).profit_abs)
+                except Exception:
+                    pass
 
             max_potential = None
             if max_rate and open_rate > 0:
@@ -345,7 +350,7 @@ interface PairStat {
 }
 
 const pairStats = computed((): PairStat[] => {
-  const all = perfData.value?.trades ?? [];
+  const all = tableTradeLimit.value === null ? (perfData.value?.trades ?? []) : tableTrades.value;
   const pairMap: Record<string, TradePerf[]> = {};
   for (const t of all) {
     if (!pairMap[t.pair]) pairMap[t.pair] = [];
@@ -711,7 +716,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono font-semibold" :class="ps.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.totalProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.7 ? 'text-green-400' : ps.exitEfficiency >= 0 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
-                <td class="p-2.5 text-center font-mono text-green-400">{{ pct(ps.avgPeak) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgPeak >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgPeak) }}</td>
                 <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
                 <td class="p-2.5 text-center font-mono font-bold" :class="ps.score >= pairStats[0]?.score * 0.8 ? 'text-green-400' : ps.score >= pairStats[0]?.score * 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ ps.score }} ({{ Math.round(ps.score / (pairStats.length * 10) * 100) }}%)</td>
