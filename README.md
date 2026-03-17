@@ -1,4 +1,4 @@
-# Cyberdine Strategies UI  `v1.4.0`
+# Cyberdine Strategies UI  `v1.4.05`
 
 Custom FreqUI overlay for Cyberdine Strategies RL trading rigs.
 

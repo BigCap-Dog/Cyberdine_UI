@@ -1,9 +1,28 @@
 # Changelog
 
+## v1.4.05 — 2026-03-17
+
+updated push notation
+
+### Changes
+-updated push script  to include detailed notation 
+- 
+- 
+
+
 ## v1.4.0 — 2026-03-17
 
 Confidence charts zoomed to 90-100% with 1% buckets for higher resolution. Peak/left/valley columns color coded across both tables (peak: red<0 yellow<5% green>5%, left: green<5% yellow<10% red>10%, valley: green/red by sign). ALL PAIRS avg peak now computed. Phase column infers pre-exit state — Trailing_Win (green) for winners, Trailing_Loss (red) for losers. Trough renamed to Valley. Bottom table syncs with top table trade limit toggle.
-
+-Confidence charts zoomed to 90-100% with 1% resolution buckets
+-Avg Peak colors: red <0%, yellow 0-5%, green >5% (both tables + ALL PAIRS)
+-Avg Left colors: green 0-5%, yellow 5-10%, red >10% (both tables)
+-Left on table in trade details: same color coding as pair breakdown
+-ALL PAIRS avg peak now shows actual average instead of "—"
+-Bottom table syncs with top table trade limit toggle
+-Phase renamed: RL_Exit infers pre-exit state (Trailing_Win / Trailing_Loss)
+-Loss_Mitigation → Trailing_Loss (red), Trailing → Trailing_Win (green)
+-Trough column renamed to Valley, positive values show green
+-Peak column: red <0%, yellow 0-5%, green >5%
 
 ## v1.3.96 — 2026-03-15
 
