@@ -443,8 +443,9 @@ const allPairsSummary = computed((): PairStat => {
   const avgProfitDollar = allClosed.length > 0
     ? allClosed.reduce((a, t) => a + (t.close_profit_abs ?? 0), 0) / allClosed.length : 0;
   const totalProfitDollar = allClosed.reduce((a, t) => a + (t.close_profit_abs ?? 0), 0);
-  const avgPeakVal = s?.avg_left_on_table !== undefined && s?.avg_profit !== undefined
-    ? (s.avg_profit + s.avg_left_on_table) : 0;
+  const peakTrades = allClosed.filter((t) => t.peak_profit !== null);
+  const allAvgPeak = peakTrades.length > 0 ? peakTrades.reduce((a, t) => a + (t.peak_profit ?? 0), 0) / peakTrades.length : 0;
+  const avgPeakVal = allAvgPeak > 0 ? allAvgPeak : 0;
   const exitEfficiency = avgPeakVal > 0 ? 1 - ((s?.avg_left_on_table ?? 0) / avgPeakVal) : 0;
   return {
     pair: 'ALL PAIRS',
@@ -458,7 +459,7 @@ const allPairsSummary = computed((): PairStat => {
     confToWinRate,
     confToProfitRatio: confToWinRate,
     exitEfficiency,
-    avgPeak: 0,
+    avgPeak: allAvgPeak,
     avgLeft: s?.avg_left_on_table ?? 0,
     avgDrawdown: s?.avg_drawdown_from_peak ?? 0,
     score: 0,
@@ -479,17 +480,26 @@ function selectPair(pair: string | null) {
   currentPage.value = 1;
 }
 
-// Pagination computed
-const totalPages = computed(() => Math.ceil(allTrades.value.length / pageSize));
-const paginatedTrades = computed(() => {
-  const start = (currentPage.value - 1) * pageSize;
-  // Open trades first, then closed sorted by close_date descending
-  const openTrades = allTrades.value.filter((t) => t.is_open).sort((a, b) => {
+// Pagination computed - respects tableTradeLimit
+const bottomTrades = computed(() => {
+  if (tableTradeLimit.value === null) return allTrades.value;
+  const sorted = [...allTrades.value].sort((a, b) => {
     const da = a.open_date ? new Date(a.open_date).getTime() : 0;
     const db = b.open_date ? new Date(b.open_date).getTime() : 0;
     return db - da;
   });
-  const closedTrades = allTrades.value.filter((t) => !t.is_open).sort((a, b) => {
+  return sorted.slice(0, tableTradeLimit.value);
+});
+const totalPages = computed(() => Math.ceil(bottomTrades.value.length / pageSize));
+const paginatedTrades = computed(() => {
+  const start = (currentPage.value - 1) * pageSize;
+  // Open trades first, then closed sorted by close_date descending
+  const openTrades = bottomTrades.value.filter((t) => t.is_open).sort((a, b) => {
+    const da = a.open_date ? new Date(a.open_date).getTime() : 0;
+    const db = b.open_date ? new Date(b.open_date).getTime() : 0;
+    return db - da;
+  });
+  const closedTrades = bottomTrades.value.filter((t) => !t.is_open).sort((a, b) => {
     const da = a.close_date ? new Date(a.close_date).getTime() : 0;
     const db = b.close_date ? new Date(b.close_date).getTime() : 0;
     return db - da;
@@ -504,14 +514,16 @@ function goToPage(page: number) {
 
 const confidenceVsProfitChart = computed<EChartsOption>(() => {
   const trades = chartClosedTrades.value;
-  // Build confidence buckets for win rate line
-  const buckets = Array.from({ length: 10 }, (_, i) => ({ min: i/10, max: (i+1)/10, wins: 0, total: 0 }));
+  // Build confidence buckets for win rate line (90-100% in 1% steps)
+  const buckets = Array.from({ length: 10 }, (_, i) => ({ min: (90+i)/100, max: (91+i)/100, wins: 0, total: 0 }));
   for (const t of trades) {
-    const idx = Math.min(9, Math.floor(t.model_confidence * 10));
+    const pct = t.model_confidence * 100;
+    if (pct < 90) continue;
+    const idx = Math.min(9, Math.floor(pct - 90));
     buckets[idx].total++;
     if ((t.close_profit ?? 0) > 0) buckets[idx].wins++;
   }
-  const bucketLabels = buckets.map((_, i) => (i * 10 + 5) / 100); // midpoints: 0.05, 0.15, ...
+  const bucketLabels = buckets.map((b) => (b.min + b.max) / 2); // midpoints
   const winRates = buckets.map((b) => b.total > 0 ? (b.wins / b.total) : null);
 
   return {
@@ -520,7 +532,7 @@ const confidenceVsProfitChart = computed<EChartsOption>(() => {
       if (p.seriesType === 'line') return `Conf ${(p.data[0]*100).toFixed(0)}%: Win Rate ${(p.data[1]*100).toFixed(0)}%`;
       const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(0)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`;
     } },
-    xAxis: { name: 'Model Confidence', nameLocation: 'middle', nameGap: 30, min: 0, max: 1 },
+    xAxis: { name: 'Model Confidence', nameLocation: 'middle', nameGap: 30, min: 0.9, max: 1, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(0)}%` } },
     yAxis: [
       { name: 'Close Profit %', nameLocation: 'middle', nameGap: 45, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
       { name: 'Win Rate %', nameLocation: 'middle', nameGap: 35, position: 'right', min: 0, max: 1, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(0)}%` }, splitLine: { show: false } },
@@ -586,8 +598,8 @@ const tradeJourneyChart = computed<EChartsOption>(() => {
 });
 
 const confidenceDistChart = computed<EChartsOption>(() => {
-  const buckets = Array.from({ length: 10 }, (_, i) => ({ label: `${i*10}-${(i+1)*10}%`, min: i/10, max: (i+1)/10, wins: 0, losses: 0, total: 0 }));
-  for (const t of chartTrades.value) { const idx = Math.min(9, Math.floor(t.model_confidence * 10)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
+  const buckets = Array.from({ length: 10 }, (_, i) => ({ label: `${90+i}-${91+i}%`, min: (90+i)/100, max: (91+i)/100, wins: 0, losses: 0, total: 0 }));
+  for (const t of chartTrades.value) { const pct = t.model_confidence * 100; if (pct < 90) continue; const idx = Math.min(9, Math.floor(pct - 90)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
   return {
     title: { text: 'Confidence Distribution & Win Rate', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'axis' },
@@ -623,18 +635,40 @@ function formatDuration(t: TradePerf): string {
   return `${d}d ${rh}h`;
 }
 
-function phaseClass(phase: string | null): string {
-  switch (phase) {
-    case 'Entry':           return 'bg-red-900/50 text-red-400';        // dark red bg, bright red font — fresh trade
-    case 'Loss_Mitigation': return 'bg-red-900/50 text-red-950';        // bright red bg, dark red font — RL cutting loser
-    case 'Patience_S1':     return 'bg-red-600/30 text-red-400';        // medium red — first patience squeeze
-    case 'Patience_S2':     return 'bg-red-500/25 text-red-400';        // lighter red — second patience squeeze
-    case 'Trailing':        return 'bg-green-900/50 text-green-400';    // dark green bg, bright green font — winner trailing
-    case 'Entry_SL':        return 'bg-red-900/50 text-red-400';        // legacy v10 compat
-    case 'Stoploss':        return 'bg-red-500/20 text-red-400';        // legacy compat
-    case 'Armed_SL':        return 'bg-yellow-500/25 text-yellow-300';  // legacy compat
-    case 'RL_Exit':       return 'bg-cyan-500/25 text-cyan-300';      // cyan — model timed exit
-    default:              return 'text-surface-500';
+// Map display name for phases — RL_Exit shows inferred pre-exit phase
+function phaseDisplay(t: TradePerf): string {
+  const phase = t.sl_phase;
+  if (!phase) return '—';
+  if (phase === 'Loss_Mitigation') return 'Trailing_Loss';
+  if (phase === 'Trailing') return 'Trailing_Win';
+  if (phase === 'RL_Exit') {
+    // Infer pre-exit state from exit tag
+    const tag = t.exit_tag || '';
+    if (tag.startsWith('RL_LossCut')) return 'Trailing_Loss';
+    if (tag.startsWith('RL_Exit')) {
+      // Check if trade was profitable
+      if (t.close_profit !== null && t.close_profit > 0) return 'Trailing_Win';
+      return 'Trailing_Loss';
+    }
+    return 'RL_Exit';
+  }
+  return phase;
+}
+
+function phaseClass(phase: string | null, t?: TradePerf): string {
+  // Use display name for color mapping
+  const display = t ? phaseDisplay(t) : (phase || '');
+  switch (display) {
+    case 'Entry':           return 'bg-red-900/50 text-red-400';
+    case 'Trailing_Loss':   return 'bg-red-500/30 text-red-400';
+    case 'Trailing_Win':    return 'bg-green-500/30 text-green-400';
+    case 'Patience_S1':     return 'bg-red-600/30 text-red-400';
+    case 'Patience_S2':     return 'bg-red-500/25 text-red-400';
+    case 'Entry_SL':        return 'bg-red-900/50 text-red-400';
+    case 'Stoploss':        return 'bg-red-500/20 text-red-400';
+    case 'Armed_SL':        return 'bg-yellow-500/25 text-yellow-300';
+    case 'RL_Exit':         return 'bg-cyan-500/25 text-cyan-300';
+    default:                return 'text-surface-500';
   }
 }
 
@@ -716,8 +750,8 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono font-semibold" :class="ps.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.totalProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.exitEfficiency >= 0.7 ? 'text-green-400' : ps.exitEfficiency >= 0 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.exitEfficiency, 1) }}</td>
-                <td class="p-2.5 text-center font-mono" :class="ps.avgPeak >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgPeak) }}</td>
-                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(ps.avgLeft) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgPeak < 0 ? 'text-red-400' : ps.avgPeak < 0.05 ? 'text-yellow-400' : 'text-green-400'">{{ pct(ps.avgPeak) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="ps.avgLeft <= 0.05 ? 'text-green-400' : ps.avgLeft <= 0.10 ? 'text-yellow-400' : 'text-red-400'">{{ pct(ps.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(ps.avgDrawdown) }}</td>
                 <td class="p-2.5 text-center font-mono font-bold" :class="ps.score >= pairStats[0]?.score * 0.8 ? 'text-green-400' : ps.score >= pairStats[0]?.score * 0.5 ? 'text-yellow-400' : 'text-red-400'">{{ ps.score }} ({{ Math.round(ps.score / (pairStats.length * 10) * 100) }}%)</td>
               </tr>
@@ -737,8 +771,8 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.avgProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono font-semibold" :class="allPairsSummary.totalProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.totalProfitDollar.toFixed(2) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.exitEfficiency >= 0.7 ? 'text-green-400' : allPairsSummary.exitEfficiency >= 0 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.exitEfficiency, 1) }}</td>
-                <td class="p-2.5 text-center font-mono text-green-400">—</td>
-                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(allPairsSummary.avgLeft) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgPeak < 0 ? 'text-red-400' : allPairsSummary.avgPeak < 0.05 ? 'text-yellow-400' : 'text-green-400'">{{ pct(allPairsSummary.avgPeak) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgLeft <= 0.05 ? 'text-green-400' : allPairsSummary.avgLeft <= 0.10 ? 'text-yellow-400' : 'text-red-400'">{{ pct(allPairsSummary.avgLeft) }}</td>
                 <td class="p-2.5 text-center font-mono text-red-400">{{ pct(allPairsSummary.avgDrawdown) }}</td>
                 <td class="p-2.5 text-center font-mono font-bold" :class="packTightnessScore >= 75 ? 'text-green-400' : packTightnessScore >= 50 ? 'text-yellow-400' : 'text-red-400'">{{ packTightnessScore }}%</td>
               </tr>
@@ -788,7 +822,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-xl font-semibold">Trade Details</h2>
           <div class="flex items-center gap-2 text-base">
-            <span class="text-surface-400">{{ allTrades.length }} trades</span>
+            <span class="text-surface-400">{{ bottomTrades.length }} trades</span>
             <span class="text-surface-500">|</span>
             <span class="text-surface-400">Page {{ currentPage }} of {{ totalPages }}</span>
           </div>
@@ -804,7 +838,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Stake</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Profit</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Peak</th>
-              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Trough</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Valley</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Left</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Phase</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Exit</th>
@@ -819,10 +853,10 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center">{{ t.leverage }}x</td>
                 <td class="p-2.5 text-center font-mono">${{ t.stake_amount.toFixed(1) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.close_profit !== null ? pct(t.close_profit) : '—' }}<span v-if="t.is_open" class="text-xs text-cyan-400 ml-1">●</span></td>
-                <td class="p-2.5 text-center font-mono text-green-400">{{ pct(t.peak_profit) }}</td>
-                <td class="p-2.5 text-center font-mono text-red-400">{{ pct(t.trough_profit) }}</td>
-                <td class="p-2.5 text-center font-mono text-yellow-400">{{ pct(t.left_on_table) }}</td>
-                <td class="p-2.5 text-center"><span class="px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase)">{{ t.sl_phase || '—' }}</span></td>
+                <td class="p-2.5 text-center font-mono" :class="(t.peak_profit ?? 0) < 0 ? 'text-red-400' : (t.peak_profit ?? 0) < 0.05 ? 'text-yellow-400' : 'text-green-400'">{{ pct(t.peak_profit) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="(t.trough_profit ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(t.trough_profit) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="(t.left_on_table ?? 0) <= 0.05 ? 'text-green-400' : (t.left_on_table ?? 0) <= 0.10 ? 'text-yellow-400' : 'text-red-400'">{{ pct(t.left_on_table) }}</td>
+                <td class="p-2.5 text-center"><span class="px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase, t)">{{ phaseDisplay(t) }}</span></td>
                 <td class="p-2.5 text-center max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
                 <td class="p-2.5 text-center">{{ formatDuration(t) }}</td>
               </tr>

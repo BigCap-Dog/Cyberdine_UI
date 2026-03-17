@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.4.0 — 2026-03-17
+
+Confidence charts zoomed to 90-100% with 1% buckets for higher resolution. Peak/left/valley columns color coded across both tables (peak: red<0 yellow<5% green>5%, left: green<5% yellow<10% red>10%, valley: green/red by sign). ALL PAIRS avg peak now computed. Phase column infers pre-exit state — Trailing_Win (green) for winners, Trailing_Loss (red) for losers. Trough renamed to Valley. Bottom table syncs with top table trade limit toggle.
+
+
 ## v1.3.96 — 2026-03-15
 
 Fix pair table toggles, open trade unrealized PnL from live candle data, avg peak negative color
