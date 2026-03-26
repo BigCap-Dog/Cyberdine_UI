@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.4.06 — 2026-03-26
+
+v10.6 phase support — developing, preserve1/2, trailing1/2, stop-loss inference
+
+### Changes
+-Phase column updated for v10.6 strategy phases: developing (grey), preserve1/2 (yellow), tra>
+-Closed trades show last phase before exit, inferred from exit_tag prefix
+-Trades stopped out in developing phase show "Stop-Loss" (red bg, black font)
+-Legacy v10/v10.5 phase colors preserved for older trades
+-Updated pnpm to latest 
+
+
 ## v1.4.05 — 2026-03-17
 
 updated push notation

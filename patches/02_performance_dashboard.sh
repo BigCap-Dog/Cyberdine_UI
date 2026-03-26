@@ -635,40 +635,75 @@ function formatDuration(t: TradePerf): string {
   return `${d}d ${rh}h`;
 }
 
-// Map display name for phases — RL_Exit shows inferred pre-exit phase
+// Map display name for phases — infer last phase before exit from exit_tag
 function phaseDisplay(t: TradePerf): string {
   const phase = t.sl_phase;
-  if (!phase) return '—';
+  const exitTag = t.exit_tag || '';
+  const exitReason = t.exit_reason || '';
+  const isStopExit = exitReason === 'stop_loss' || exitReason === 'trailing_stop_loss';
+
+  // ── Open trades: show current phase as-is ──
+  if (t.is_open) {
+    return phase || 'developing';
+  }
+
+  // ── Closed trades: infer last phase from exit_tag or sl_phase ──
+
+  // Special case: stopped out in developing → show Stop-Loss
+  if (phase === 'developing' && isStopExit) return 'Stop-Loss';
+  if (!phase && isStopExit) return 'Stop-Loss';
+
+  // Exit tag starts with the phase name (e.g., "preserve1_roc_Pk+2.4%_Lw-1.4%" or "trailing1_Pk+5.1%")
+  if (exitTag.startsWith('trailing2')) return 'trailing2';
+  if (exitTag.startsWith('trailing1')) return 'trailing1';
+  if (exitTag.startsWith('preserve2')) return 'preserve2';
+  if (exitTag.startsWith('preserve1')) return 'preserve1';
+
+  // If phase is still set from custom_stoploss, use it
+  if (phase === 'developing' || phase === 'preserve1' || phase === 'preserve2' || phase === 'trailing1' || phase === 'trailing2') {
+    // If it's developing and stopped out, already handled above
+    if (phase === 'developing' && isStopExit) return 'Stop-Loss';
+    return phase;
+  }
+
+  // ── Legacy v10/v10.5 compat ──
   if (phase === 'Loss_Mitigation') return 'Trailing_Loss';
   if (phase === 'Trailing') return 'Trailing_Win';
   if (phase === 'RL_Exit') {
-    // Infer pre-exit state from exit tag
-    const tag = t.exit_tag || '';
+    const tag = exitTag;
     if (tag.startsWith('RL_LossCut')) return 'Trailing_Loss';
-    if (tag.startsWith('RL_Exit')) {
-      // Check if trade was profitable
-      if (t.close_profit !== null && t.close_profit > 0) return 'Trailing_Win';
-      return 'Trailing_Loss';
-    }
-    return 'RL_Exit';
+    if (t.close_profit !== null && t.close_profit > 0) return 'Trailing_Win';
+    return 'Trailing_Loss';
   }
-  return phase;
+  if (phase === 'Entry' || phase === 'Entry_SL') {
+    if (isStopExit) return 'Stop-Loss';
+    return phase;
+  }
+
+  return phase || '—';
 }
 
 function phaseClass(phase: string | null, t?: TradePerf): string {
-  // Use display name for color mapping
   const display = t ? phaseDisplay(t) : (phase || '');
   switch (display) {
-    case 'Entry':           return 'bg-red-900/50 text-red-400';
-    case 'Trailing_Loss':   return 'bg-red-500/30 text-red-400';
-    case 'Trailing_Win':    return 'bg-green-500/30 text-green-400';
-    case 'Patience_S1':     return 'bg-red-600/30 text-red-400';
-    case 'Patience_S2':     return 'bg-red-500/25 text-red-400';
-    case 'Entry_SL':        return 'bg-red-900/50 text-red-400';
-    case 'Stoploss':        return 'bg-red-500/20 text-red-400';
-    case 'Armed_SL':        return 'bg-yellow-500/25 text-yellow-300';
-    case 'RL_Exit':         return 'bg-cyan-500/25 text-cyan-300';
-    default:                return 'text-surface-500';
+    // ── v10.6 phases ──
+    case 'developing':    return 'bg-surface-600/60 text-white font-bold';
+    case 'preserve1':     return 'bg-yellow-400/30 text-yellow-400 font-bold';
+    case 'preserve2':     return 'bg-yellow-500/40 text-yellow-300 font-bold';
+    case 'trailing1':     return 'bg-green-500/30 text-green-400 font-bold';
+    case 'trailing2':     return 'bg-green-600/40 text-green-300 font-bold';
+    case 'Stop-Loss':     return 'bg-red-600/50 text-black font-bold';
+    // ── Legacy v10 compat ──
+    case 'Entry':         return 'bg-red-900/50 text-red-400';
+    case 'Trailing_Loss': return 'bg-red-500/30 text-red-400';
+    case 'Trailing_Win':  return 'bg-green-500/30 text-green-400';
+    case 'Patience_S1':   return 'bg-red-600/30 text-red-400';
+    case 'Patience_S2':   return 'bg-red-500/25 text-red-400';
+    case 'Entry_SL':      return 'bg-red-900/50 text-red-400';
+    case 'Stoploss':      return 'bg-red-500/20 text-red-400';
+    case 'Armed_SL':      return 'bg-yellow-500/25 text-yellow-300';
+    case 'RL_Exit':       return 'bg-cyan-500/25 text-cyan-300';
+    default:              return 'text-surface-500';
   }
 }
 
