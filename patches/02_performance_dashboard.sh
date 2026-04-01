@@ -789,7 +789,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono">{{ ps.trades }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.open > 0 ? 'text-cyan-400' : ''">{{ ps.open }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.winRate, 1) }}</td>
-                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(ps.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(ps.avgConfidence, 1) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.confToWinRate >= 0.9 ? 'text-green-400' : ps.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ ps.confToWinRate.toFixed(2) }}x</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(ps.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="ps.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ ps.avgProfitDollar.toFixed(2) }}</td>
@@ -810,7 +810,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center font-mono">{{ allPairsSummary.trades }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.open > 0 ? 'text-cyan-400' : ''">{{ allPairsSummary.open }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.winRate >= 0.5 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.winRate, 1) }}</td>
-                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(allPairsSummary.avgConfidence, 0) }}</td>
+                <td class="p-2.5 text-center font-mono text-blue-400">{{ pct(allPairsSummary.avgConfidence, 1) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.confToWinRate >= 0.9 ? 'text-green-400' : allPairsSummary.confToWinRate >= 0.7 ? 'text-yellow-400' : 'text-red-400'">{{ allPairsSummary.confToWinRate.toFixed(2) }}x</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfit >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(allPairsSummary.avgProfit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="allPairsSummary.avgProfitDollar >= 0 ? 'text-green-400' : 'text-red-400'">${{ allPairsSummary.avgProfitDollar.toFixed(2) }}</td>

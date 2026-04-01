@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.4.2 — 2026-04-01
+
+added decimal to avg conf column in performance dashboard
+
+### Changes
+- added decimal to reflect actual avg.. 
+
+
 ## v1.4.1 — 2026-04-01
 
 v10.6 phase system, dual trailing labels, confidence chart resolution, per-trade efficiency
