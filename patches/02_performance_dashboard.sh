@@ -64,6 +64,16 @@ method_code = '''
 
             # Read custom data from bulk map instead of per-trade queries
             t_custom = custom_map.get(t.id, {})
+
+            # Use action_prob from custom_data for full precision (e.g., 0.982)
+            try:
+                action_prob_raw = t_custom.get("action_prob")
+                if action_prob_raw is not None:
+                    action_float = float(action_prob_raw)
+                    # action_prob is encoded as action + prob (e.g., 3.982 = action 3, prob 0.982)
+                    prob = round(action_float - int(action_float), 3)
+            except (ValueError, TypeError):
+                pass  # keep enter_tag-derived prob as fallback
             pk_str = t_custom.get("pk")
             lw_str = t_custom.get("lw")
             sl_phase = t_custom.get("sl_phase")
@@ -514,12 +524,12 @@ function goToPage(page: number) {
 
 const confidenceVsProfitChart = computed<EChartsOption>(() => {
   const trades = chartClosedTrades.value;
-  // Build confidence buckets for win rate line (90-100% in 1% steps)
-  const buckets = Array.from({ length: 10 }, (_, i) => ({ min: (90+i)/100, max: (91+i)/100, wins: 0, total: 0 }));
+  // Build confidence buckets for win rate line (97-100% in 0.25% steps, 12 buckets)
+  const buckets = Array.from({ length: 12 }, (_, i) => ({ min: (97 + i * 0.25) / 100, max: (97 + (i + 1) * 0.25) / 100, wins: 0, total: 0 }));
   for (const t of trades) {
     const pct = t.model_confidence * 100;
-    if (pct < 90) continue;
-    const idx = Math.min(9, Math.floor(pct - 90));
+    if (pct < 97) continue;
+    const idx = Math.min(11, Math.floor((pct - 97) / 0.25));
     buckets[idx].total++;
     if ((t.close_profit ?? 0) > 0) buckets[idx].wins++;
   }
@@ -530,9 +540,9 @@ const confidenceVsProfitChart = computed<EChartsOption>(() => {
     title: { text: 'Confidence vs Profit & Win Rate', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'item', formatter: (p: any) => {
       if (p.seriesType === 'line') return `Conf ${(p.data[0]*100).toFixed(0)}%: Win Rate ${(p.data[1]*100).toFixed(0)}%`;
-      const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(0)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`;
+      const d = p.data; return `#${d[3]} ${d[4]}<br/>Confidence: ${(d[0]*100).toFixed(1)}%<br/>Profit: ${(d[1]*100).toFixed(2)}%<br/>Leverage: ${d[2]}x`;
     } },
-    xAxis: { name: 'Model Confidence', nameLocation: 'middle', nameGap: 30, min: 0.9, max: 1, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(0)}%` } },
+    xAxis: { name: 'Model Confidence', nameLocation: 'middle', nameGap: 30, min: 0.97, max: 1, interval: 0.0025, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(2)}%`, rotate: 45 } },
     yAxis: [
       { name: 'Close Profit %', nameLocation: 'middle', nameGap: 45, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(1)}%` } },
       { name: 'Win Rate %', nameLocation: 'middle', nameGap: 35, position: 'right', min: 0, max: 1, axisLabel: { formatter: (v: number) => `${(v*100).toFixed(0)}%` }, splitLine: { show: false } },
@@ -598,8 +608,8 @@ const tradeJourneyChart = computed<EChartsOption>(() => {
 });
 
 const confidenceDistChart = computed<EChartsOption>(() => {
-  const buckets = Array.from({ length: 10 }, (_, i) => ({ label: `${90+i}-${91+i}%`, min: (90+i)/100, max: (91+i)/100, wins: 0, losses: 0, total: 0 }));
-  for (const t of chartTrades.value) { const pct = t.model_confidence * 100; if (pct < 90) continue; const idx = Math.min(9, Math.floor(pct - 90)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
+  const buckets = Array.from({ length: 12 }, (_, i) => ({ label: `${(97 + i * 0.25).toFixed(2)}%`, min: (97 + i * 0.25) / 100, max: (97 + (i + 1) * 0.25) / 100, wins: 0, losses: 0, total: 0 }));
+  for (const t of chartTrades.value) { const pct = t.model_confidence * 100; if (pct < 97) continue; const idx = Math.min(11, Math.floor((pct - 97) / 0.25)); buckets[idx].total++; if ((t.close_profit ?? 0) > 0) buckets[idx].wins++; else buckets[idx].losses++; }
   return {
     title: { text: 'Confidence Distribution & Win Rate', left: 'center', textStyle: { fontSize: 18 } },
     tooltip: { trigger: 'axis' },
@@ -635,50 +645,51 @@ function formatDuration(t: TradePerf): string {
   return `${d}d ${rh}h`;
 }
 
-// Map display name for phases — infer last phase before exit from exit_tag
+// Map display name for phases — infer last phase before exit
 function phaseDisplay(t: TradePerf): string {
   const phase = t.sl_phase;
   const exitTag = t.exit_tag || '';
   const exitReason = t.exit_reason || '';
   const isStopExit = exitReason === 'stop_loss' || exitReason === 'trailing_stop_loss';
 
-  // ── Open trades: show current phase as-is ──
+  // ── Open trades: map phase names ──
   if (t.is_open) {
+    if (phase === 'trailing') return 'Trailing';  // show capitalized for open trailing trades
     return phase || 'developing';
   }
 
-  // ── Closed trades: infer last phase from exit_tag or sl_phase ──
+  // ── Closed: v10.6 phases ──
 
-  // Special case: stopped out in developing → show Stop-Loss
-  if (phase === 'developing' && isStopExit) return 'Stop-Loss';
-  if (!phase && isStopExit) return 'Stop-Loss';
+  // Stopped out in developing → Stop-Loss
+  if ((!phase || phase === 'developing') && isStopExit) return 'Stop-Loss';
 
-  // Exit tag starts with the phase name (e.g., "preserve1_roc_Pk+2.4%_Lw-1.4%" or "trailing1_Pk+5.1%")
-  if (exitTag.startsWith('trailing2')) return 'trailing2';
-  if (exitTag.startsWith('trailing1')) return 'trailing1';
-  if (exitTag.startsWith('preserve2')) return 'preserve2';
-  if (exitTag.startsWith('preserve1')) return 'preserve1';
-
-  // If phase is still set from custom_stoploss, use it
-  if (phase === 'developing' || phase === 'preserve1' || phase === 'preserve2' || phase === 'trailing1' || phase === 'trailing2') {
-    // If it's developing and stopped out, already handled above
-    if (phase === 'developing' && isStopExit) return 'Stop-Loss';
-    return phase;
+  // Trailing phase: differentiate by HOW it exited
+  if (phase === 'trailing') {
+    // Mechanical TSL: exit_reason is stop_loss or trailing_stop_loss
+    if (isStopExit) return 'Trailing';
+    // RL+TEMA custom_exit: exit_reason is the tag string like "trailing_Pk+8.1%_Lw+7.1%"
+    return 'RL_Trailing';
   }
 
-  // ── Legacy v10/v10.5 compat ──
+  // Preserve exits (TEMA ROC from custom_exit or stoploss)
+  if (exitTag.startsWith('preserve2') || phase === 'preserve2') return 'preserve2';
+  if (exitTag.startsWith('preserve1') || phase === 'preserve1') return 'preserve1';
+
+  // Direct v10.6 phase values (open or developing)
+  if (phase === 'developing') return phase;
+
+  // ── Legacy v10.5 compat ──
+  if (phase === 'trailing1') return 'Trailing';
+  if (phase === 'trailing2') return 'RL_Trailing';
   if (phase === 'Loss_Mitigation') return 'Trailing_Loss';
-  if (phase === 'Trailing') return 'Trailing_Win';
+  if (phase === 'Trailing') return 'Trailing';
   if (phase === 'RL_Exit') {
-    const tag = exitTag;
-    if (tag.startsWith('RL_LossCut')) return 'Trailing_Loss';
-    if (t.close_profit !== null && t.close_profit > 0) return 'Trailing_Win';
+    if (exitTag.startsWith('RL_LossCut')) return 'Trailing_Loss';
+    if (t.close_profit !== null && t.close_profit > 0) return 'RL_Trailing';
     return 'Trailing_Loss';
   }
-  if (phase === 'Entry' || phase === 'Entry_SL') {
-    if (isStopExit) return 'Stop-Loss';
-    return phase;
-  }
+  if ((phase === 'Entry' || phase === 'Entry_SL') && isStopExit) return 'Stop-Loss';
+  if (phase === 'Entry' || phase === 'Entry_SL') return phase;
 
   return phase || '—';
 }
@@ -690,10 +701,9 @@ function phaseClass(phase: string | null, t?: TradePerf): string {
     case 'developing':    return 'bg-surface-600/60 text-white font-bold';
     case 'preserve1':     return 'bg-yellow-400/30 text-yellow-400 font-bold';
     case 'preserve2':     return 'bg-yellow-500/40 text-yellow-300 font-bold';
-    case 'trailing1':     return 'bg-green-500/30 text-green-400 font-bold';
-    case 'trailing2':     return 'bg-green-600/40 text-green-300 font-bold';
-    case 'Stop-Loss':     return 'bg-red-600/50 text-black font-bold';
-    // ── Legacy v10 compat ──
+    case 'Trailing':      return 'bg-green-700/40 text-green-200 font-bold';       // mechanical TSL — deep green + pale text
+    case 'RL_Trailing':   return 'bg-green-400/20 text-green-500 font-bold';       // RL+TEMA — lime green + pure green text
+    case 'Stop-Loss':     return 'bg-red-600/50 text-white font-bold';
     case 'Entry':         return 'bg-red-900/50 text-red-400';
     case 'Trailing_Loss': return 'bg-red-500/30 text-red-400';
     case 'Trailing_Win':  return 'bg-green-500/30 text-green-400';
@@ -875,6 +885,7 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Peak</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Valley</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Left</th>
+              <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide" title="1 - (left/peak) — how much of peak was captured">Eff</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Phase</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Exit</th>
               <th class="text-center p-2.5 uppercase font-bold text-white tracking-wide">Duration</th>
@@ -884,13 +895,14 @@ function pct(v: number | null | undefined, d = 2): string { if (v === null || v 
                 <td class="p-2.5 text-center">{{ t.id }}</td>
                 <td class="p-2.5 text-center font-mono">{{ t.pair }}</td>
                 <td class="p-2.5 text-center"><span :class="t.direction === 'long' ? 'text-green-400' : 'text-red-400'">{{ t.direction.toUpperCase() }}</span></td>
-                <td class="p-2.5 text-center font-mono">{{ (t.model_confidence*100).toFixed(0) }}%</td>
+                <td class="p-2.5 text-center font-mono">{{ (t.model_confidence*100).toFixed(1) }}%</td>
                 <td class="p-2.5 text-center">{{ t.leverage }}x</td>
                 <td class="p-2.5 text-center font-mono">${{ t.stake_amount.toFixed(1) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="(t.close_profit??0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ t.close_profit !== null ? pct(t.close_profit) : '—' }}<span v-if="t.is_open" class="text-xs text-cyan-400 ml-1">●</span></td>
                 <td class="p-2.5 text-center font-mono" :class="(t.peak_profit ?? 0) < 0 ? 'text-red-400' : (t.peak_profit ?? 0) < 0.05 ? 'text-yellow-400' : 'text-green-400'">{{ pct(t.peak_profit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="(t.trough_profit ?? 0) >= 0 ? 'text-green-400' : 'text-red-400'">{{ pct(t.trough_profit) }}</td>
                 <td class="p-2.5 text-center font-mono" :class="(t.left_on_table ?? 0) <= 0.05 ? 'text-green-400' : (t.left_on_table ?? 0) <= 0.10 ? 'text-yellow-400' : 'text-red-400'">{{ pct(t.left_on_table) }}</td>
+                <td class="p-2.5 text-center font-mono" :class="t.peak_profit && t.peak_profit > 0 ? ((1 - ((t.left_on_table ?? 0) / t.peak_profit)) >= 0.7 ? 'text-green-400' : (1 - ((t.left_on_table ?? 0) / t.peak_profit)) >= 0 ? 'text-yellow-400' : 'text-red-400') : 'text-surface-500'">{{ t.peak_profit && t.peak_profit > 0 && t.left_on_table !== null ? pct(1 - (t.left_on_table / t.peak_profit), 1) : '—' }}</td>
                 <td class="p-2.5 text-center"><span class="px-1.5 py-0.5 rounded font-semibold" :class="phaseClass(t.sl_phase, t)">{{ phaseDisplay(t) }}</span></td>
                 <td class="p-2.5 text-center max-w-48 truncate" :title="t.exit_tag || t.exit_reason || ''">{{ t.exit_tag || t.exit_reason || (t.is_open ? '—' : 'unknown') }}</td>
                 <td class="p-2.5 text-center">{{ formatDuration(t) }}</td>

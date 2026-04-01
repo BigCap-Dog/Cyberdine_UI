@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.4.1 — 2026-04-01
+
+v10.6 phase system, dual trailing labels, confidence chart resolution, per-trade efficiency
+
+### Changes
+-Phase column: v10.6 phases — developing (grey), preserve1/2 (yellow), trailing (deep green), RL_Trailing (lime green), Stop-Loss (red/white)
+-Dual trailing exit differentiation: mechanical TSL = "Trailing" (dark green), RL+TEMA custom_exit = "RL_Trailing" (lime green), identified by exit_reason
+-Stop-Loss phase shown when trade stopped out during developing phase
+-Confidence charts zoomed to 97-100% with 12 buckets (0.25% intervals)
+-Confidence scatter x-axis forced to 12 tick marks with angled labels
+-Backend reads action_prob from custom_data for full decimal precision (0.982 vs 0.98)
+-Trade details confidence column shows 1 decimal (98.2% instead of 98%)
+-Added per-trade Efficiency column in trade details: 1-(left/peak), color coded green/yellow/red
+-Trailing color options: Trailing = bg-green-700/40 text-green-200, RL_Trailing = bg-green-400/20 text-green-500
+-Backwards compatible with v10/v10.5 phase names 
+ 
+ 
+
+
 ## v1.4.06 — 2026-03-26
 
 v10.6 phase support — developing, preserve1/2, trailing1/2, stop-loss inference
