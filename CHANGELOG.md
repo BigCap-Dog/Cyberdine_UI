@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.4.3 — 2026-06-01
+
+trade tab rollback
+
+### Changes
+- rolling back tad tab due to prob chart not lining up with candle chart 
+- 
+- 
+
+
 ## v1.4.2 — 2026-04-01
 
 added decimal to avg conf column in performance dashboard
